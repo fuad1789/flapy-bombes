@@ -1,5 +1,6 @@
 import {
   GAME_HEIGHT,
+  GAME_WIDTH,
   BIRD_WIDTH,
   BIRD_HEIGHT,
   BIRD_X,
@@ -8,10 +9,30 @@ import {
   PIPE_WIDTH,
   MIN_PIPE_HEIGHT,
   GROUND_HEIGHT,
+  COIN_RADIUS,
+  COIN_SCORE,
+  POWERUP_SIZE,
+  GAP_SHRINK_PER_SCORE,
+  MIN_GAP,
+  SHRINK_SCALE,
+  MOVING_PIPE_THRESHOLD,
+  MOVING_PIPE_AMPLITUDE,
+  MOVING_PIPE_SPEED,
+  BOSS_PIPE_WIDTH_MULT,
+  BOSS_GAP_REDUCTION,
+  BOSS_BONUS_SCORE,
+  BOSS_PIPE_INTERVAL,
+  COMBO_THRESHOLDS,
   DIFFICULTIES,
   type Bird,
   type Pipe,
   type Particle,
+  type Coin,
+  type PowerUp,
+  type PowerUpType,
+  type ActivePowerUp,
+  type ComboState,
+  type DeathAnimation,
   type Difficulty,
 } from "./constants";
 
@@ -32,73 +53,352 @@ export function jumpBird(bird: Bird): Bird {
   return { ...bird, velocity: JUMP_FORCE, rotation: -30 };
 }
 
-export function createPipe(gameHeight: number, gap: number): Pipe {
-  const maxTop = gameHeight - GROUND_HEIGHT - gap - MIN_PIPE_HEIGHT;
+export function createPipe(gameHeight: number, gap: number, score: number): Pipe {
+  const isBoss = score > 0 && score % BOSS_PIPE_INTERVAL === 0;
+  const pipeWidth = isBoss ? Math.round(PIPE_WIDTH * BOSS_PIPE_WIDTH_MULT) : PIPE_WIDTH;
+  const effectiveGap = isBoss ? gap - BOSS_GAP_REDUCTION : gap;
+  const moving = !isBoss && score >= MOVING_PIPE_THRESHOLD && Math.random() < 0.4;
+
+  const maxTop = gameHeight - GROUND_HEIGHT - effectiveGap - MIN_PIPE_HEIGHT;
   const topHeight = MIN_PIPE_HEIGHT + Math.random() * (maxTop - MIN_PIPE_HEIGHT);
+
   return {
     x: 420,
     topHeight,
     passed: false,
     id: pipeIdCounter++,
+    moving,
+    baseTopHeight: topHeight,
+    movePhase: Math.random() * Math.PI * 2,
+    isBoss,
+    width: pipeWidth,
   };
 }
 
 export function updatePipes(
   pipes: readonly Pipe[],
-  speed: number
+  speed: number,
+  frame: number
 ): readonly Pipe[] {
   return pipes
-    .map((p) => ({ ...p, x: p.x - speed }))
-    .filter((p) => p.x + PIPE_WIDTH > -10);
+    .map((p) => {
+      const newX = p.x - speed;
+      if (p.moving) {
+        const newPhase = p.movePhase + MOVING_PIPE_SPEED;
+        const newTopHeight = p.baseTopHeight + Math.sin(newPhase) * MOVING_PIPE_AMPLITUDE;
+        return { ...p, x: newX, movePhase: newPhase, topHeight: newTopHeight };
+      }
+      return { ...p, x: newX };
+    })
+    .filter((p) => p.x + p.width > -10);
 }
 
 export function checkCollision(
   bird: Bird,
   pipes: readonly Pipe[],
-  gap: number
-): boolean {
+  gap: number,
+  hasShield: boolean,
+  isShrunk: boolean
+): { collided: boolean; shieldUsed: boolean } {
   const groundY = GAME_HEIGHT - GROUND_HEIGHT;
+  const scale = isShrunk ? SHRINK_SCALE : 1;
+  const effectiveW = BIRD_WIDTH * scale;
+  const effectiveH = BIRD_HEIGHT * scale;
+  const offsetX = (BIRD_WIDTH - effectiveW) / 2;
+  const offsetY = (BIRD_HEIGHT - effectiveH) / 2;
 
-  // Ground/ceiling
-  if (bird.y + BIRD_HEIGHT > groundY || bird.y < 0) {
-    return true;
+  // Ground/ceiling — always fatal, no shield
+  if (bird.y + offsetY + effectiveH > groundY || bird.y + offsetY < 0) {
+    return { collided: true, shieldUsed: false };
   }
 
   // Pipes
   for (const pipe of pipes) {
-    // Generous hitbox inset — character PNG has transparent edges
-    const inset = 16;
-    const birdRight = BIRD_X + BIRD_WIDTH - inset;
-    const birdLeft = BIRD_X + inset;
-    const birdTop = bird.y + inset;
-    const birdBottom = bird.y + BIRD_HEIGHT - inset;
+    const inset = 16 * scale;
+    const birdRight = BIRD_X + offsetX + effectiveW - inset;
+    const birdLeft = BIRD_X + offsetX + inset;
+    const birdTop = bird.y + offsetY + inset;
+    const birdBottom = bird.y + offsetY + effectiveH - inset;
 
-    if (birdRight > pipe.x && birdLeft < pipe.x + PIPE_WIDTH) {
-      if (birdTop < pipe.topHeight || birdBottom > pipe.topHeight + gap) {
-        return true;
+    const effectiveGap = pipe.isBoss ? gap - BOSS_GAP_REDUCTION : gap;
+
+    if (birdRight > pipe.x && birdLeft < pipe.x + pipe.width) {
+      if (birdTop < pipe.topHeight || birdBottom > pipe.topHeight + effectiveGap) {
+        if (hasShield) {
+          return { collided: false, shieldUsed: true };
+        }
+        return { collided: true, shieldUsed: false };
       }
     }
   }
 
-  return false;
+  return { collided: false, shieldUsed: false };
 }
 
 export function checkScore(
   pipes: readonly Pipe[],
-  score: number
-): { pipes: readonly Pipe[]; score: number; scored: boolean } {
+  score: number,
+  combo: ComboState
+): { pipes: readonly Pipe[]; score: number; scored: boolean; combo: ComboState; bossBonus: boolean } {
   let newScore = score;
   let scored = false;
+  let bossBonus = false;
+  let newCombo = combo;
+
   const newPipes = pipes.map((p) => {
-    if (!p.passed && p.x + PIPE_WIDTH < BIRD_X) {
-      newScore++;
+    if (!p.passed && p.x + p.width < BIRD_X) {
+      const multiplier = newCombo.multiplier;
+      newScore += multiplier;
+      if (p.isBoss) {
+        newScore += BOSS_BONUS_SCORE;
+        bossBonus = true;
+      }
       scored = true;
+
+      // Update combo
+      const newConsecutive = newCombo.consecutivePipes + 1;
+      const newMultiplier = getComboMultiplier(newConsecutive);
+      const showTimer = newMultiplier > newCombo.multiplier ? 90 : newCombo.displayTimer;
+      newCombo = {
+        consecutivePipes: newConsecutive,
+        multiplier: newMultiplier,
+        displayTimer: showTimer,
+        lastMultiplier: newMultiplier > combo.multiplier ? newMultiplier : newCombo.lastMultiplier,
+      };
+
       return { ...p, passed: true };
     }
     return p;
   });
-  return { pipes: newPipes, score: newScore, scored };
+
+  return { pipes: newPipes, score: newScore, scored, combo: newCombo, bossBonus };
 }
+
+function getComboMultiplier(consecutivePipes: number): number {
+  let mult = 1;
+  for (const t of COMBO_THRESHOLDS) {
+    if (consecutivePipes >= t.pipes) {
+      mult = t.multiplier;
+    }
+  }
+  return mult;
+}
+
+export function createComboState(): ComboState {
+  return { consecutivePipes: 0, multiplier: 1, displayTimer: 0, lastMultiplier: 1 };
+}
+
+export function updateComboDisplay(combo: ComboState): ComboState {
+  if (combo.displayTimer <= 0) return combo;
+  return { ...combo, displayTimer: combo.displayTimer - 1 };
+}
+
+// ─── Coins ───
+
+export function createCoin(pipe: Pipe, gap: number): Coin {
+  const effectiveGap = pipe.isBoss ? gap - BOSS_GAP_REDUCTION : gap;
+  // Center coin exactly in the middle of the gap
+  const coinY = pipe.topHeight + effectiveGap / 2;
+
+  return {
+    x: pipe.x + pipe.width / 2,
+    y: coinY,
+    collected: false,
+    pipeId: pipe.id,
+    animPhase: Math.random() * Math.PI * 2,
+  };
+}
+
+export function updateCoins(
+  coins: readonly Coin[],
+  pipes: readonly Pipe[],
+  speed: number,
+  gap: number = 160
+): readonly Coin[] {
+  return coins
+    .map((c) => {
+      // Find associated pipe to track position for moving pipes
+      const pipe = pipes.find((p) => p.id === c.pipeId);
+      if (pipe) {
+        const effectiveGap = pipe.isBoss ? gap - BOSS_GAP_REDUCTION : gap;
+        // Keep coin centered in gap (tracks moving pipes)
+        const coinY = pipe.topHeight + effectiveGap / 2;
+        return {
+          ...c,
+          x: pipe.x + pipe.width / 2,
+          y: coinY,
+          animPhase: c.animPhase + 0.1,
+        };
+      }
+      return { ...c, x: c.x - speed, animPhase: c.animPhase + 0.1 };
+    })
+    .filter((c) => !c.collected && c.x > -20);
+}
+
+export function checkCoinCollision(
+  bird: Bird,
+  coins: readonly Coin[],
+  isShrunk: boolean
+): { coins: readonly Coin[]; collected: number } {
+  const scale = isShrunk ? SHRINK_SCALE : 1;
+  const effectiveW = BIRD_WIDTH * scale;
+  const effectiveH = BIRD_HEIGHT * scale;
+  const offsetX = (BIRD_WIDTH - effectiveW) / 2;
+  const offsetY = (BIRD_HEIGHT - effectiveH) / 2;
+
+  let collected = 0;
+  const newCoins = coins.map((c) => {
+    if (c.collected) return c;
+
+    const birdCX = BIRD_X + offsetX + effectiveW / 2;
+    const birdCY = bird.y + offsetY + effectiveH / 2;
+    const dx = birdCX - c.x;
+    const dy = birdCY - c.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < COIN_RADIUS + effectiveW / 2 - 8) {
+      collected++;
+      return { ...c, collected: true };
+    }
+    return c;
+  });
+
+  return { coins: newCoins, collected };
+}
+
+// ─── Power-ups ───
+
+export function createPowerUp(pipe: Pipe, gap: number): PowerUp {
+  const types: PowerUpType[] = ["shield", "shrink", "slowdown"];
+  const type = types[Math.floor(Math.random() * types.length)];
+  const effectiveGap = pipe.isBoss ? gap - BOSS_GAP_REDUCTION : gap;
+  // Place power-up in the pipe gap, slightly offset from center
+  const gapCenter = pipe.topHeight + effectiveGap / 2;
+  const offset = (Math.random() - 0.5) * (effectiveGap * 0.4);
+  const y = gapCenter + offset;
+
+  return {
+    x: pipe.x + pipe.width / 2,
+    y,
+    type,
+    collected: false,
+    baseY: y,
+    animPhase: Math.random() * Math.PI * 2,
+    pipeId: pipe.id,
+  };
+}
+
+export function updatePowerUps(
+  powerUps: readonly PowerUp[],
+  pipes: readonly Pipe[],
+  speed: number,
+  gap: number = 160
+): readonly PowerUp[] {
+  return powerUps
+    .map((p) => {
+      const newPhase = p.animPhase + 0.05;
+      // Track associated pipe position (for moving pipes)
+      const pipe = pipes.find((pp) => pp.id === p.pipeId);
+      if (pipe) {
+        const effectiveGap = pipe.isBoss ? gap - BOSS_GAP_REDUCTION : gap;
+        const gapCenter = pipe.topHeight + effectiveGap / 2;
+        const bobY = gapCenter + Math.sin(newPhase) * 8;
+        return { ...p, x: pipe.x + pipe.width / 2, y: bobY, animPhase: newPhase };
+      }
+      const bobY = p.baseY + Math.sin(newPhase) * 8;
+      return { ...p, x: p.x - speed, y: bobY, animPhase: newPhase };
+    })
+    .filter((p) => !p.collected && p.x > -30);
+}
+
+export function checkPowerUpCollision(
+  bird: Bird,
+  powerUps: readonly PowerUp[],
+  isShrunk: boolean
+): { powerUps: readonly PowerUp[]; collected: PowerUpType | null } {
+  const scale = isShrunk ? SHRINK_SCALE : 1;
+  const effectiveW = BIRD_WIDTH * scale;
+  const effectiveH = BIRD_HEIGHT * scale;
+  const offsetX = (BIRD_WIDTH - effectiveW) / 2;
+  const offsetY = (BIRD_HEIGHT - effectiveH) / 2;
+
+  let collectedType: PowerUpType | null = null;
+  const newPowerUps = powerUps.map((p) => {
+    if (p.collected) return p;
+
+    const birdCX = BIRD_X + offsetX + effectiveW / 2;
+    const birdCY = bird.y + offsetY + effectiveH / 2;
+    const dx = birdCX - p.x;
+    const dy = birdCY - p.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < POWERUP_SIZE + effectiveW / 2 - 10) {
+      collectedType = p.type;
+      return { ...p, collected: true };
+    }
+    return p;
+  });
+
+  return { powerUps: newPowerUps, collected: collectedType };
+}
+
+export function getActivePowerUps(
+  actives: readonly ActivePowerUp[],
+  now: number
+): readonly ActivePowerUp[] {
+  return actives.filter((a) => {
+    if (a.type === "shield") return true; // Shield stays until used
+    return a.expiresAt > now;
+  });
+}
+
+export function hasActivePowerUp(
+  actives: readonly ActivePowerUp[],
+  type: PowerUpType
+): boolean {
+  return actives.some((a) => a.type === type);
+}
+
+export function removeShield(
+  actives: readonly ActivePowerUp[]
+): readonly ActivePowerUp[] {
+  const idx = actives.findIndex((a) => a.type === "shield");
+  if (idx === -1) return actives;
+  return [...actives.slice(0, idx), ...actives.slice(idx + 1)];
+}
+
+// ─── Death animation ───
+
+export function createDeathAnimation(birdY: number): DeathAnimation {
+  return {
+    active: true,
+    spinSpeed: 5,
+    extraRotation: 0,
+    flashAlpha: 0.7,
+    fallVelocity: -2,
+    birdY,
+  };
+}
+
+export function updateDeathAnimation(da: DeathAnimation): DeathAnimation {
+  if (!da.active) return da;
+  const groundY = GAME_HEIGHT - GROUND_HEIGHT - BIRD_HEIGHT;
+  const newFallVel = da.fallVelocity + 0.3;
+  const newY = Math.min(da.birdY + newFallVel, groundY);
+  const hitGround = newY >= groundY;
+
+  return {
+    ...da,
+    spinSpeed: hitGround ? 0 : da.spinSpeed + 0.5,
+    extraRotation: da.extraRotation + da.spinSpeed,
+    flashAlpha: Math.max(da.flashAlpha - 0.03, 0),
+    fallVelocity: hitGround ? 0 : newFallVel,
+    birdY: newY,
+    active: !hitGround || da.flashAlpha > 0.01,
+  };
+}
+
+// ─── Particles ───
 
 export function createScoreParticles(birdY: number): readonly Particle[] {
   const colors = ["#FFD700", "#FFA500", "#FF6347", "#00CED1", "#7CFC00"];
@@ -114,15 +414,28 @@ export function createScoreParticles(birdY: number): readonly Particle[] {
 }
 
 export function createDeathParticles(birdY: number): readonly Particle[] {
-  const colors = ["#f7c948", "#e8a735", "#ff6347", "#ffffff"];
-  return Array.from({ length: 15 }, () => ({
+  const colors = ["#f7c948", "#e8a735", "#ff6347", "#ffffff", "#ff4444", "#ffaa00"];
+  return Array.from({ length: 30 }, () => ({
     x: BIRD_X + BIRD_WIDTH / 2,
     y: birdY + BIRD_HEIGHT / 2,
-    vx: (Math.random() - 0.5) * 10,
-    vy: (Math.random() - 0.5) * 10,
+    vx: (Math.random() - 0.5) * 14,
+    vy: (Math.random() - 0.5) * 14,
     life: 1,
     color: colors[Math.floor(Math.random() * colors.length)],
-    size: 3 + Math.random() * 5,
+    size: 3 + Math.random() * 7,
+  }));
+}
+
+export function createCoinParticles(x: number, y: number): readonly Particle[] {
+  const colors = ["#FFD700", "#FFC700", "#FFE066", "#FFAA00"];
+  return Array.from({ length: 10 }, () => ({
+    x,
+    y,
+    vx: (Math.random() - 0.5) * 8,
+    vy: (Math.random() - 0.5) * 8,
+    life: 1,
+    color: colors[Math.floor(Math.random() * colors.length)],
+    size: 2 + Math.random() * 4,
   }));
 }
 

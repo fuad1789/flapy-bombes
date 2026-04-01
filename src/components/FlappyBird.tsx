@@ -6,10 +6,23 @@ import {
   GAME_HEIGHT,
   GROUND_HEIGHT,
   DIFFICULTIES,
+  COIN_SCORE,
+  POWERUP_SPAWN_INTERVAL,
+  POWERUP_DURATION,
+  BOSS_PIPE_INTERVAL,
+  SLOWDOWN_FACTOR,
+  GAP_SHRINK_PER_SCORE,
+  MIN_GAP,
   type Pipe,
   type Particle,
+  type Coin,
+  type PowerUp,
+  type ActivePowerUp,
+  type ComboState,
+  type DeathAnimation,
   type GameScreen,
   type Difficulty,
+  type PowerUpType,
 } from "@/game/constants";
 import {
   createBird,
@@ -21,7 +34,21 @@ import {
   checkScore,
   createScoreParticles,
   createDeathParticles,
+  createCoinParticles,
   updateParticles,
+  createCoin,
+  updateCoins,
+  checkCoinCollision,
+  createPowerUp,
+  updatePowerUps,
+  checkPowerUpCollision,
+  getActivePowerUps,
+  hasActivePowerUp,
+  removeShield,
+  createComboState,
+  updateComboDisplay,
+  createDeathAnimation,
+  updateDeathAnimation,
   getHighScore,
   saveHighScore,
   getLeaderboard,
@@ -39,9 +66,15 @@ import {
   drawParticles,
   drawScore,
   drawGetReady,
+  drawCoin,
+  drawPowerUp,
+  drawPowerUpIndicator,
+  drawShieldGlow,
+  drawCombo,
+  drawScreenFlash,
 } from "@/game/renderer";
 
-/* ─── Sound hook ─── */
+/* --- Sound hook --- */
 function useSoundEffects(enabled: boolean) {
   const audioCtxRef = useRef<AudioContext | null>(null);
 
@@ -80,10 +113,24 @@ function useSoundEffects(enabled: boolean) {
     }, [playTone]),
     hit: useCallback(() => playTone(180, 0.25, "sawtooth"), [playTone]),
     click: useCallback(() => playTone(440, 0.04, "sine"), [playTone]),
+    coin: useCallback(() => {
+      playTone(880, 0.06, "sine");
+      setTimeout(() => playTone(1100, 0.08, "sine"), 50);
+      setTimeout(() => playTone(1320, 0.1, "sine"), 100);
+    }, [playTone]),
+    powerUp: useCallback(() => {
+      playTone(440, 0.1, "sine");
+      setTimeout(() => playTone(660, 0.1, "sine"), 80);
+      setTimeout(() => playTone(880, 0.15, "sine"), 160);
+    }, [playTone]),
+    shieldBreak: useCallback(() => {
+      playTone(300, 0.15, "triangle");
+      setTimeout(() => playTone(200, 0.2, "triangle"), 100);
+    }, [playTone]),
   };
 }
 
-/* ─── Stars component (deterministic) ─── */
+/* --- Stars component (deterministic) --- */
 const STARS = Array.from({ length: 50 }, (_, i) => ({
   left: `${(i * 41 + 7) % 100}%`,
   top: `${(i * 29 + 13) % 100}%`,
@@ -93,9 +140,9 @@ const STARS = Array.from({ length: 50 }, (_, i) => ({
   isGold: i % 7 === 0,
 }));
 
-/* ═══════════════════════════════════════
+/* ===========================
    MAIN COMPONENT
-   ═══════════════════════════════════════ */
+   =========================== */
 export default function FlappyBird() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -115,15 +162,22 @@ export default function FlappyBird() {
     bird: createBird(GAME_HEIGHT / 2 - 50),
     pipes: [] as readonly Pipe[],
     particles: [] as readonly Particle[],
+    coins: [] as readonly Coin[],
+    powerUps: [] as readonly PowerUp[],
+    activePowerUps: [] as readonly ActivePowerUp[],
+    combo: createComboState(),
+    deathAnim: null as DeathAnimation | null,
     score: 0,
     frame: 0,
     bgOffset: 0,
     lastPipeTime: 0,
+    lastPowerUpTime: 0,
     isRunning: false,
     waitingForStart: true,
     shakeFrames: 0,
     lastFrameTime: 0,
     accumulator: 0,
+    isDying: false,
   });
 
   const animRef = useRef<number>(0);
@@ -138,10 +192,9 @@ export default function FlappyBird() {
 
   useEffect(() => {
     function handleResize() {
-      const pad = 20;
-      const maxW = window.innerWidth - pad * 2;
-      const maxH = window.innerHeight - pad * 2;
-      const s = Math.min(maxW / GAME_WIDTH, maxH / GAME_HEIGHT, 1.5);
+      const maxW = window.innerWidth;
+      const maxH = window.innerHeight;
+      const s = Math.min(maxW / GAME_WIDTH, maxH / GAME_HEIGHT);
       setCssWidth(Math.round(GAME_WIDTH * s));
       setCssHeight(Math.round(GAME_HEIGHT * s));
     }
@@ -150,7 +203,7 @@ export default function FlappyBird() {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  /* ─── Game loop ─── */
+  /* --- Game loop --- */
   const gameLoop = useCallback((timestamp: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -161,10 +214,21 @@ export default function FlappyBird() {
     const diff = DIFFICULTIES[difficulty];
     const STEP = 1000 / 60;
 
-    // Progressive speed: +8% every 5 points, capped at +60%
-    const speedBoost = 1 + Math.min(Math.floor(gs.score / 5) * 0.08, 0.6);
-    const currentSpeed = diff.speed * speedBoost;
-    const currentGravity = diff.gravity * (1 + Math.min(Math.floor(gs.score / 10) * 0.05, 0.3));
+    // Progressive speed: +4% every 5 points, capped at +35%
+    const speedBoost = 1 + Math.min(Math.floor(gs.score / 5) * 0.04, 0.35);
+
+    // Slowdown power-up
+    const isSlowed = hasActivePowerUp(gs.activePowerUps, "slowdown");
+    const slowMult = isSlowed ? SLOWDOWN_FACTOR : 1;
+
+    const currentSpeed = diff.speed * speedBoost * slowMult;
+    const currentGravity = diff.gravity * (1 + Math.min(Math.floor(gs.score / 15) * 0.03, 0.18));
+
+    // Progressive gap shrink: gap decreases with score, but never below MIN_GAP
+    const currentGap = Math.max(diff.gap - gs.score * GAP_SHRINK_PER_SCORE, MIN_GAP);
+
+    const isShrunk = hasActivePowerUp(gs.activePowerUps, "shrink");
+    const hasShield = hasActivePowerUp(gs.activePowerUps, "shield");
 
     if (gs.lastFrameTime === 0) gs.lastFrameTime = timestamp;
     const delta = Math.min(timestamp - gs.lastFrameTime, 50);
@@ -175,10 +239,27 @@ export default function FlappyBird() {
       gs.accumulator -= STEP;
       gs.frame++;
 
+      if (gs.isDying) {
+        // Death animation update
+        if (gs.deathAnim) {
+          gs.deathAnim = updateDeathAnimation(gs.deathAnim);
+        }
+        gs.particles = updateParticles(gs.particles);
+        if (gs.shakeFrames > 0) gs.shakeFrames--;
+        continue;
+      }
+
       if (gs.isRunning && !gs.waitingForStart) {
         gs.bird = updateBird(gs.bird, currentGravity);
-        gs.pipes = updatePipes(gs.pipes, currentSpeed);
+        gs.pipes = updatePipes(gs.pipes, currentSpeed, gs.frame);
+        gs.coins = updateCoins(gs.coins, gs.pipes, currentSpeed, currentGap);
+        gs.powerUps = updatePowerUps(gs.powerUps, gs.pipes, currentSpeed, currentGap);
         gs.particles = updateParticles(gs.particles);
+        gs.combo = updateComboDisplay(gs.combo);
+
+        // Expire timed power-ups
+        gs.activePowerUps = getActivePowerUps(gs.activePowerUps, performance.now());
+
         if (gs.shakeFrames > 0) gs.shakeFrames--;
         gs.bgOffset += currentSpeed;
       } else if (gs.waitingForStart) {
@@ -191,15 +272,28 @@ export default function FlappyBird() {
       }
     }
 
-    if (gs.isRunning && !gs.waitingForStart) {
+    if (gs.isRunning && !gs.waitingForStart && !gs.isDying) {
+      // Spawn pipes
       const pipeInterval = Math.max(2800 / speedBoost, 1800);
       if (timestamp - gs.lastPipeTime > pipeInterval) {
-        gs.pipes = [...gs.pipes, createPipe(GAME_HEIGHT, diff.gap)];
+        const newPipe = createPipe(GAME_HEIGHT, currentGap, gs.score);
+        gs.pipes = [...gs.pipes, newPipe];
+        // Create coin in the gap (70% chance, always for boss)
+        if (Math.random() < 0.7 || newPipe.isBoss) {
+          gs.coins = [...gs.coins, createCoin(newPipe, currentGap)];
+        }
+        // Spawn power-up in pipe gap (~15s interval)
+        if (timestamp - gs.lastPowerUpTime > POWERUP_SPAWN_INTERVAL) {
+          gs.powerUps = [...gs.powerUps, createPowerUp(newPipe, currentGap)];
+          gs.lastPowerUpTime = timestamp;
+        }
         gs.lastPipeTime = timestamp;
       }
 
-      const scoreResult = checkScore(gs.pipes, gs.score);
+      // Check score (pipes passed)
+      const scoreResult = checkScore(gs.pipes, gs.score, gs.combo);
       gs.pipes = scoreResult.pipes;
+      gs.combo = scoreResult.combo;
       if (scoreResult.scored) {
         gs.score = scoreResult.score;
         setScore(gs.score);
@@ -207,30 +301,102 @@ export default function FlappyBird() {
         sound.score();
       }
 
-      if (checkCollision(gs.bird, gs.pipes, diff.gap)) {
+      // Check coin collection
+      const coinResult = checkCoinCollision(gs.bird, gs.coins, isShrunk);
+      if (coinResult.collected > 0) {
+        // Find newly collected coins for particles
+        for (let i = 0; i < gs.coins.length; i++) {
+          if (!gs.coins[i].collected && coinResult.coins[i].collected) {
+            gs.particles = [...gs.particles, ...createCoinParticles(gs.coins[i].x, gs.coins[i].y)];
+          }
+        }
+        gs.coins = coinResult.coins;
+        gs.score += coinResult.collected * COIN_SCORE;
+        setScore(gs.score);
+        sound.coin();
+      }
+
+      // Check power-up collection
+      const puResult = checkPowerUpCollision(gs.bird, gs.powerUps, isShrunk);
+      gs.powerUps = puResult.powerUps;
+      if (puResult.collected) {
+        const now = performance.now();
+        const newActive: ActivePowerUp = {
+          type: puResult.collected,
+          expiresAt: puResult.collected === "shield" ? 0 : now + POWERUP_DURATION,
+        };
+        // Replace existing of same type, or add
+        const filtered = gs.activePowerUps.filter((a) => a.type !== puResult.collected);
+        gs.activePowerUps = [...filtered, newActive];
+        sound.powerUp();
+      }
+
+      // Check collision
+      const collisionResult = checkCollision(gs.bird, gs.pipes, currentGap, hasShield, isShrunk);
+
+      if (collisionResult.shieldUsed) {
+        gs.activePowerUps = removeShield(gs.activePowerUps);
+        gs.shakeFrames = 8;
+        sound.shieldBreak();
+      }
+
+      if (collisionResult.collided) {
         gs.isRunning = false;
+        gs.isDying = true;
+        gs.deathAnim = createDeathAnimation(gs.bird.y);
         gs.particles = [...gs.particles, ...createDeathParticles(gs.bird.y)];
         gs.shakeFrames = 15;
+        gs.combo = createComboState(); // Reset combo
         sound.hit();
         const isNew = gs.score > getHighScore();
         if (isNew) { saveHighScore(gs.score); setHighScore(gs.score); setIsNewHighScore(true); }
         else setIsNewHighScore(false);
-        setTimeout(() => setScreen("gameover"), 500);
-        return;
+        setTimeout(() => {
+          gs.isDying = false;
+          setScreen("gameover");
+        }, 500);
       }
     }
 
+    // ─── Drawing ───
     ctx.save();
     if (gs.shakeFrames > 0) {
       ctx.translate((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8);
     }
-    drawBackground(ctx, gs.bgOffset);
-    for (const pipe of gs.pipes) drawPipe(ctx, pipe, diff.gap);
+
+    drawBackground(ctx, gs.bgOffset, gs.score);
+
+    for (const pipe of gs.pipes) drawPipe(ctx, pipe, currentGap);
+
+    // Draw coins
+    for (const coin of gs.coins) drawCoin(ctx, coin);
+
+    // Draw power-ups
+    for (const pu of gs.powerUps) drawPowerUp(ctx, pu);
+
     drawGround(ctx, gs.bgOffset);
-    drawBird(ctx, gs.bird, gs.frame);
+
+    // Draw bird with shield glow
+    if (hasShield && !gs.isDying) {
+      drawShieldGlow(ctx, gs.bird, gs.frame);
+    }
+
+    drawBird(ctx, gs.bird, gs.frame, isShrunk, gs.isDying ? gs.deathAnim : null);
     drawParticles(ctx, gs.particles);
-    if (gs.isRunning && !gs.waitingForStart) drawScore(ctx, gs.score);
+
+    if ((gs.isRunning || gs.isDying) && !gs.waitingForStart) {
+      drawScore(ctx, gs.score);
+      drawCombo(ctx, gs.combo);
+      drawPowerUpIndicator(ctx, gs.activePowerUps, performance.now());
+    }
+
     if (gs.waitingForStart && gs.isRunning) drawGetReady(ctx, gs.frame);
+
+    // Death screen flash
+    if (gs.deathAnim && gs.deathAnim.flashAlpha > 0) {
+      drawScreenFlash(ctx, gs.deathAnim.flashAlpha);
+    }
+
     ctx.restore();
 
     animRef.current = requestAnimationFrame(gameLoop);
@@ -247,7 +413,10 @@ export default function FlappyBird() {
     if (screen !== "menu") return;
     const gs = gameStateRef.current;
     gs.bird = createBird(GAME_HEIGHT / 2 - 50);
-    gs.pipes = []; gs.particles = []; gs.score = 0; gs.frame = 0;
+    gs.pipes = []; gs.particles = []; gs.coins = []; gs.powerUps = [];
+    gs.activePowerUps = []; gs.combo = createComboState();
+    gs.deathAnim = null; gs.isDying = false;
+    gs.score = 0; gs.frame = 0;
     gs.isRunning = true; gs.waitingForStart = true;
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
@@ -257,7 +426,7 @@ export default function FlappyBird() {
       const gs = gameStateRef.current;
       gs.frame++; gs.bgOffset += 0.5;
       gs.bird = { ...gs.bird, y: GAME_HEIGHT / 2 - 50 + Math.sin(gs.frame * 0.06) * 12, rotation: 0 };
-      drawBackground(ctx!, gs.bgOffset);
+      drawBackground(ctx!, gs.bgOffset, 0);
       drawGround(ctx!, gs.bgOffset);
       drawBird(ctx!, gs.bird, gs.frame);
       rafId = requestAnimationFrame(menuLoop);
@@ -269,9 +438,13 @@ export default function FlappyBird() {
   const startGame = useCallback(() => {
     const gs = gameStateRef.current;
     gs.bird = createBird(GAME_HEIGHT / 2 - 50);
-    gs.pipes = []; gs.particles = []; gs.score = 0; gs.frame = 0;
+    gs.pipes = []; gs.particles = []; gs.coins = []; gs.powerUps = [];
+    gs.activePowerUps = []; gs.combo = createComboState();
+    gs.deathAnim = null; gs.isDying = false;
+    gs.score = 0; gs.frame = 0;
     gs.isRunning = true; gs.waitingForStart = true;
     gs.lastPipeTime = performance.now();
+    gs.lastPowerUpTime = performance.now();
     gs.lastFrameTime = 0; gs.accumulator = 0;
     setScore(0); setIsNewHighScore(false); setScreen("playing");
     sound.click();
@@ -279,8 +452,12 @@ export default function FlappyBird() {
 
   const handleJump = useCallback(() => {
     const gs = gameStateRef.current;
-    if (!gs.isRunning) return;
-    if (gs.waitingForStart) { gs.waitingForStart = false; gs.lastPipeTime = performance.now(); }
+    if (!gs.isRunning || gs.isDying) return;
+    if (gs.waitingForStart) {
+      gs.waitingForStart = false;
+      gs.lastPipeTime = performance.now();
+      gs.lastPowerUpTime = performance.now();
+    }
     gs.bird = jumpBird(gs.bird);
     sound.jump();
   }, [sound]);
@@ -297,8 +474,6 @@ export default function FlappyBird() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [screen, handleJump, startGame]);
 
-  // No document-level touch handlers — everything uses onClick only
-
   function handleSaveScore() {
     if (!playerName.trim()) return;
     addToLeaderboard(playerName.trim(), score);
@@ -314,9 +489,9 @@ export default function FlappyBird() {
     return null;
   };
 
-  /* ═══════════════════════
+  /* ===========
      RENDER
-     ═══════════════════════ */
+     =========== */
   return (
     <div
       ref={containerRef}
@@ -324,56 +499,28 @@ export default function FlappyBird() {
       style={{
         width: "100vw",
         height: "100dvh",
-        background: "radial-gradient(ellipse at 50% 20%, #1e2a5e 0%, #111833 40%, #080c1f 100%)",
+        background: "#4ec0ca",
+        overflow: "hidden",
       }}
     >
-      {/* Starfield */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        {STARS.map((s, i) => (
-          <div
-            key={i}
-            className="absolute rounded-full"
-            style={{
-              width: s.size, height: s.size,
-              left: s.left, top: s.top,
-              background: s.isGold ? "#ffcc33" : "#cde",
-              animation: `twinkle ${s.duration}s ease-in-out infinite`,
-              animationDelay: `${s.delay}s`,
-            }}
-          />
-        ))}
-      </div>
-
       <div className="relative" style={{ width: cssWidth, height: cssHeight }}>
-        {/* ─── Canvas ─── */}
+        {/* --- Canvas --- */}
         <canvas
           ref={canvasRef}
           width={GAME_WIDTH}
           height={GAME_HEIGHT}
-          style={{
-            display: "block",
-            width: "100%",
-            height: "100%",
-            borderRadius: 20,
-            boxShadow: "0 24px 80px rgba(0,0,0,0.6), 0 0 0 3px rgba(255,255,255,0.12)",
-          }}
+          style={{ display: "block", width: "100%", height: "100%" }}
         />
 
-        {/* Tap area for gameplay — simple onClick, no touch magic */}
+        {/* Tap area for gameplay */}
         {screen === "playing" && (
           <div
             onClick={() => handleJump()}
-            style={{
-              position: "absolute",
-              inset: 0,
-              borderRadius: 24,
-              cursor: "pointer",
-              zIndex: 5,
-            }}
+            style={{ position: "absolute", inset: 0, cursor: "pointer", zIndex: 5 }}
           />
         )}
 
-        {/* ═══════════ MENU ═══════════ */}
+        {/* =========== MENU =========== */}
         {screen === "menu" && (
           <Overlay variant="light">
             <div style={{ animation: "floatSlow 4s ease-in-out infinite" }}>
@@ -393,7 +540,6 @@ export default function FlappyBird() {
                     0 8px 15px rgba(0,0,0,0.3),
                     0 0 40px rgba(255,204,51,0.25)
                   `,
-                  // no text-stroke to avoid artifacts on A/R glyphs
                   letterSpacing: 6,
                 }}>
                   FLAPPY
@@ -413,7 +559,6 @@ export default function FlappyBird() {
                     0 8px 15px rgba(0,0,0,0.3),
                     0 0 40px rgba(110,207,92,0.25)
                   `,
-                  // no text-stroke to avoid artifacts on R/D glyphs
                   letterSpacing: 6,
                 }}>
                   BIRD
@@ -450,16 +595,16 @@ export default function FlappyBird() {
               style={{ animation: "slideUp 0.5s ease-out 0.5s both", marginTop: 16 }}
             >
               <GlassButton onClick={() => { setScreen("settings"); sound.click(); }}>
-                ⚙️  Ayarlar
+                {"⚙️  Ayarlar"}
               </GlassButton>
               <GlassButton onClick={() => { setLeaderboard(getLeaderboard()); setScreen("leaderboard"); sound.click(); }}>
-                🏆  Lider
+                {"🏆  Lider"}
               </GlassButton>
             </div>
           </Overlay>
         )}
 
-        {/* ═══════════ GAME OVER ═══════════ */}
+        {/* =========== GAME OVER =========== */}
         {screen === "gameover" && (
           <Overlay variant="dark">
             {/* Title */}
@@ -478,7 +623,7 @@ export default function FlappyBird() {
                 `,
                 letterSpacing: 3,
               }}>
-                OYUN BİTDİ
+                {"OYUN BİTDİ"}
               </h2>
             </div>
 
@@ -534,7 +679,7 @@ export default function FlappyBird() {
               style={{ animation: "slideUp 0.4s ease-out 0.45s both", marginTop: 18 }}
             >
               <ArcadeButton color="green" size="md" onClick={startGame}>
-                ↻ Yenidən
+                {"↻ Yenidən"}
               </ArcadeButton>
               <ArcadeButton color="orange" size="md" onClick={() => setScreen("menu")}>
                 Menyu
@@ -543,7 +688,7 @@ export default function FlappyBird() {
           </Overlay>
         )}
 
-        {/* ═══════════ SETTINGS ═══════════ */}
+        {/* =========== SETTINGS =========== */}
         {screen === "settings" && (
           <Overlay variant="dark">
             <div style={{ animation: "slideDown 0.4s ease-out both" }}>
@@ -552,7 +697,7 @@ export default function FlappyBird() {
 
             {/* Difficulty */}
             <div style={{ animation: "slideUp 0.4s ease-out 0.1s both", marginTop: 32, width: 300 }}>
-              <Label>Çətinlik</Label>
+              <Label>{"Çətinlik"}</Label>
               <div className="flex gap-2" style={{ marginTop: 10 }}>
                 {(Object.entries(DIFFICULTIES) as [Difficulty, typeof DIFFICULTIES[Difficulty]][]).map(
                   ([key, val]) => {
@@ -577,7 +722,7 @@ export default function FlappyBird() {
 
             {/* Sound */}
             <div style={{ animation: "slideUp 0.4s ease-out 0.2s both", marginTop: 24, width: 300 }}>
-              <Label>Səs</Label>
+              <Label>{"Səs"}</Label>
               <div style={{ marginTop: 10 }}>
                 <ArcadeButton
                   color={soundOn ? "green" : "ghost"}
@@ -593,17 +738,17 @@ export default function FlappyBird() {
             {/* Back */}
             <div style={{ animation: "slideUp 0.4s ease-out 0.35s both", marginTop: 32 }}>
               <GlassButton onClick={() => { setScreen("menu"); sound.click(); }}>
-                ← Geri
+                {"← Geri"}
               </GlassButton>
             </div>
           </Overlay>
         )}
 
-        {/* ═══════════ LEADERBOARD ═══════════ */}
+        {/* =========== LEADERBOARD =========== */}
         {screen === "leaderboard" && (
           <Overlay variant="dark">
             <div style={{ animation: "slideDown 0.4s ease-out both" }}>
-              <SectionTitle>LİDER CƏDVƏL</SectionTitle>
+              <SectionTitle>{"LİDER CƏDVƏL"}</SectionTitle>
             </div>
 
             <div
@@ -628,7 +773,7 @@ export default function FlappyBird() {
                 }}
               >
                 <span style={{ fontFamily: "var(--font-body)", fontSize: 11, fontWeight: 800, color: "rgba(255,255,255,0.3)", letterSpacing: 2, textTransform: "uppercase" }}>
-                  Oyunçu
+                  {"Oyunçu"}
                 </span>
                 <span style={{ fontFamily: "var(--font-body)", fontSize: 11, fontWeight: 800, color: "rgba(255,255,255,0.3)", letterSpacing: 2, textTransform: "uppercase" }}>
                   Xal
@@ -637,12 +782,12 @@ export default function FlappyBird() {
 
               {leaderboard.length === 0 ? (
                 <div style={{ padding: "48px 20px", textAlign: "center" }}>
-                  <div style={{ fontSize: 36, marginBottom: 8 }}>🎮</div>
+                  <div style={{ fontSize: 36, marginBottom: 8 }}>{"🎮"}</div>
                   <p style={{ fontFamily: "var(--font-body)", fontSize: 14, color: "rgba(255,255,255,0.35)", fontWeight: 600 }}>
-                    Hələ heç kim oynamamış
+                    {"Hələ heç kim oynamamış"}
                   </p>
                   <p style={{ fontFamily: "var(--font-body)", fontSize: 12, color: "rgba(255,255,255,0.2)", marginTop: 4 }}>
-                    İlk sən ol!
+                    {"İlk sən ol!"}
                   </p>
                 </div>
               ) : (
@@ -695,7 +840,7 @@ export default function FlappyBird() {
 
             <div style={{ animation: "slideUp 0.4s ease-out 0.3s both", marginTop: 20 }}>
               <GlassButton onClick={() => { setScreen("menu"); sound.click(); }}>
-                ← Geri
+                {"← Geri"}
               </GlassButton>
             </div>
           </Overlay>
@@ -705,9 +850,9 @@ export default function FlappyBird() {
   );
 }
 
-/* ═══════════════════════════════════════
+/* ===========================
    REUSABLE UI COMPONENTS
-   ═══════════════════════════════════════ */
+   =========================== */
 
 function Overlay({ children, variant }: { children: React.ReactNode; variant: "light" | "dark" }) {
   return (
@@ -719,7 +864,6 @@ function Overlay({ children, variant }: { children: React.ReactNode; variant: "l
         left: 0,
         right: 0,
         bottom: 0,
-        borderRadius: 20,
         background: variant === "dark"
           ? "radial-gradient(ellipse at 50% 30%, rgba(20,20,50,0.88), rgba(8,8,20,0.94))"
           : "radial-gradient(ellipse at 50% 30%, rgba(0,0,0,0.25), rgba(0,0,0,0.45))",
@@ -941,7 +1085,7 @@ function ScoreCard({
 
         <div className="flex justify-between items-center">
           <span style={{ fontFamily: "var(--font-body)", fontSize: 15, fontWeight: 700, color: "rgba(255,255,255,0.5)" }}>
-            Ən Yüksək
+            {"Ən Yüksək"}
           </span>
           <span style={{
             fontFamily: "var(--font-display)",
@@ -976,7 +1120,7 @@ function ScoreCard({
             WebkitTextFillColor: "transparent",
             animation: "shimmer 2s linear infinite",
           }}>
-            ✨ YENİ REKORD ✨
+            {"✨ YENİ REKORD ✨"}
           </span>
         </div>
       )}
