@@ -5,9 +5,9 @@ export const BIRD_WIDTH = 72;
 export const BIRD_HEIGHT = 72;
 export const BIRD_X = 70;
 
-export const GRAVITY = 0.12;
-export const JUMP_FORCE = -4.2;
-export const MAX_VELOCITY = 4.5;
+export const GRAVITY = 0.14;
+export const JUMP_FORCE = -4.0;
+export const MAX_VELOCITY = 5.0;
 export const TARGET_FPS = 60;
 
 export const PIPE_WIDTH = 60;
@@ -27,11 +27,13 @@ export const COIN_RADIUS = 18;
 export const COIN_SCORE = 3;
 
 // Power-up constants
-export const POWERUP_SIZE = 28;
-export const POWERUP_SPAWN_INTERVAL = 15000; // ~15 seconds
+export const POWERUP_SIZE = 36;
+export const POWERUP_SPAWN_INTERVAL = 7000; // ~7 seconds
 export const POWERUP_DURATION = 5000; // 5 seconds for timed power-ups
+export const SHRINK_DURATION = 9000; // 9 seconds for shrink power-up
 export const SHRINK_SCALE = 0.6;
-export const SLOWDOWN_FACTOR = 0.5;
+export const CLONE_DURATION = 8000; // 8 seconds for clone power-up
+export const CLONE_Y_OFFSET = -90; // clone bird flies above main bird
 
 // Boss pipe constants
 export const BOSS_PIPE_INTERVAL = 25;
@@ -53,14 +55,15 @@ export const COMBO_THRESHOLDS = [
 ] as const;
 
 export const DIFFICULTIES = {
-  easy: { gap: 220, speed: 1.6, gravity: 0.08, label: "Asan" },
-  normal: { gap: 195, speed: 1.9, gravity: 0.10, label: "Normal" },
-  hard: { gap: 165, speed: 2.4, gravity: 0.16, label: "Çətin" },
+  easy: { gap: 240, speed: 2.0, gravity: 0.10, label: "Asan" },
+  normal: { gap: 210, speed: 2.4, gravity: 0.14, label: "Normal" },
+  hard: { gap: 175, speed: 2.8, gravity: 0.18, label: "Çətin" },
 } as const;
 
 export type Difficulty = keyof typeof DIFFICULTIES;
 
-export type PowerUpType = "shield" | "shrink" | "slowdown";
+export type PowerUpType = "drunk" | "shrink" | "clone";
+export const DRUNK_DURATION = 12000; // 12 seconds
 
 export interface Pipe {
   readonly x: number;
@@ -110,7 +113,7 @@ export interface PowerUp {
 
 export interface ActivePowerUp {
   readonly type: PowerUpType;
-  readonly expiresAt: number; // timestamp when it expires (0 for shield = until hit)
+  readonly expiresAt: number; // timestamp when it expires
 }
 
 export interface ComboState {

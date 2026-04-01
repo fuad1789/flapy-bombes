@@ -1,16 +1,22 @@
 "use client";
 
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import {
   GAME_WIDTH,
   GAME_HEIGHT,
   GROUND_HEIGHT,
+  BIRD_X,
+  BIRD_WIDTH,
+  BIRD_HEIGHT,
   DIFFICULTIES,
   COIN_SCORE,
   POWERUP_SPAWN_INTERVAL,
   POWERUP_DURATION,
+  SHRINK_DURATION,
+  CLONE_DURATION,
+  CLONE_Y_OFFSET,
+  DRUNK_DURATION,
   BOSS_PIPE_INTERVAL,
-  SLOWDOWN_FACTOR,
   GAP_SHRINK_PER_SCORE,
   MIN_GAP,
   type Pipe,
@@ -44,7 +50,6 @@ import {
   checkPowerUpCollision,
   getActivePowerUps,
   hasActivePowerUp,
-  removeShield,
   createComboState,
   updateComboDisplay,
   createDeathAnimation,
@@ -63,20 +68,37 @@ import {
   drawGround,
   drawPipe,
   drawBird,
+  drawCloneBird,
   drawParticles,
   drawScore,
   drawGetReady,
   drawCoin,
   drawPowerUp,
   drawPowerUpIndicator,
-  drawShieldGlow,
   drawCombo,
   drawScreenFlash,
 } from "@/game/renderer";
 
+// Shuffle intro power-up order (Fisher-Yates)
+function shuffleIntro(): PowerUpType[] {
+  const arr: PowerUpType[] = ["drunk", "shrink", "clone"];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 /* --- Sound hook --- */
 function useSoundEffects(enabled: boolean) {
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const pipeBuffersRef = useRef<AudioBuffer[]>([]);
+  const pipeAudiosRef = useRef<HTMLAudioElement[]>([]);
+  const lastPipeIndexRef = useRef(-1);
+  const jumpSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const jumpPlayingRef = useRef(false);
+  const jumpAudioRef = useRef<HTMLAudioElement | null>(null);
+  const jumpBufferRef = useRef<AudioBuffer | null>(null);
 
   const getCtx = useCallback(() => {
     if (!enabled) return null;
@@ -105,30 +127,296 @@ function useSoundEffects(enabled: boolean) {
     [getCtx]
   );
 
+  const PIPE_SOUNDS = useMemo(() => [
+    "/1-cibodenso.mp3",
+    "/2-daqadenso.mp3",
+    "/3-daqaqandes.mp3",
+    "/4-diboqandes.mp3",
+    "/5-lebobomba.mp3",
+    "/6-lobobomba.mp3",
+    "/7-leboqeneeees.mp3",
+    "/8-diboqamayallaaaaa.mp3",
+  ], []);
+
+  // Load all pipe sound buffers for Web Audio API (shrink mode)
+  useEffect(() => {
+    if (!enabled) return;
+    const ctx = getCtx();
+    if (!ctx || pipeBuffersRef.current.length > 0) return;
+    Promise.all(
+      PIPE_SOUNDS.map((src) =>
+        fetch(src)
+          .then((r) => r.arrayBuffer())
+          .then((buf) => ctx.decodeAudioData(buf))
+      )
+    )
+      .then((decoded) => { pipeBuffersRef.current = decoded; })
+      .catch(() => {});
+  }, [enabled, getCtx, PIPE_SOUNDS]);
+
+  // Pre-create HTMLAudioElements for normal mode
+  useEffect(() => {
+    if (!enabled || pipeAudiosRef.current.length > 0) return;
+    pipeAudiosRef.current = PIPE_SOUNDS.map((src) => {
+      const a = new Audio(src);
+      a.volume = 0.5;
+      return a;
+    });
+  }, [enabled, PIPE_SOUNDS]);
+
+  // Load jump sound buffer for Web Audio API effects
+  useEffect(() => {
+    if (!enabled) return;
+    const ctx = getCtx();
+    if (!ctx || jumpBufferRef.current) return;
+    fetch("/cecenq.mp3")
+      .then((r) => r.arrayBuffer())
+      .then((buf) => ctx.decodeAudioData(buf))
+      .then((decoded) => { jumpBufferRef.current = decoded; })
+      .catch(() => {});
+  }, [enabled, getCtx]);
+
+  // Pre-create HTMLAudioElement for jump sound
+  useEffect(() => {
+    if (!enabled || jumpAudioRef.current) return;
+    jumpAudioRef.current = new Audio("/cecenq.mp3");
+  }, [enabled]);
+
+  // Pick a random index different from the last one
+  const pickRandomIndex = useCallback(() => {
+    const count = PIPE_SOUNDS.length;
+    if (count <= 1) return 0;
+    let idx = Math.floor(Math.random() * (count - 1));
+    if (idx >= lastPipeIndexRef.current) idx++;
+    lastPipeIndexRef.current = idx;
+    return idx;
+  }, [PIPE_SOUNDS.length]);
+
+  // Play random pipe sound with effects based on power-up state
+  const playJumpAudio = useCallback((isShrunk = false, isDrunk = false, isClone = false): { idx: number; durationMs: number } => {
+    if (!enabled) return { idx: -1, durationMs: 0 };
+    // Stop jump sound if playing
+    if (jumpAudioRef.current) {
+      jumpAudioRef.current.pause();
+      jumpAudioRef.current.currentTime = 0;
+    }
+
+    const idx = pickRandomIndex();
+    const needsWebAudio = isShrunk || isDrunk || isClone;
+
+    if (needsWebAudio) {
+      // Web Audio API mode for effects
+      const ctx = getCtx();
+      if (ctx && pipeBuffersRef.current.length > 0) {
+        if (jumpSourceRef.current) {
+          try { jumpSourceRef.current.stop(); } catch { /* already stopped */ }
+        }
+        const source = ctx.createBufferSource();
+        source.buffer = pipeBuffersRef.current[idx];
+
+        let lastNode: AudioNode = source;
+
+        if (isShrunk) {
+          // Chipmunk: fast + highpass + nasal boost
+          source.playbackRate.value = 1.8;
+
+          const highpass = ctx.createBiquadFilter();
+          highpass.type = "highpass";
+          highpass.frequency.value = 900;
+
+          const peak = ctx.createBiquadFilter();
+          peak.type = "peaking";
+          peak.frequency.value = 2800;
+          peak.gain.value = 10;
+          peak.Q.value = 2.5;
+
+          lastNode.connect(highpass);
+          highpass.connect(peak);
+          lastNode = peak;
+        } else if (isDrunk) {
+          // Drunk: slow + wobbly pitch + lowpass (muffled sərxoş)
+          const drunkRate = 0.65 + Math.random() * 0.25;
+          source.playbackRate.value = drunkRate;
+
+          const now = ctx.currentTime;
+          source.playbackRate.linearRampToValueAtTime(drunkRate + 0.15, now + 0.3);
+          source.playbackRate.linearRampToValueAtTime(drunkRate - 0.1, now + 0.6);
+          source.playbackRate.linearRampToValueAtTime(drunkRate, now + 0.9);
+
+          const lowpass = ctx.createBiquadFilter();
+          lowpass.type = "lowpass";
+          lowpass.frequency.value = 1200;
+          lowpass.Q.value = 3;
+
+          const waveshaper = ctx.createWaveShaper();
+          const curve = new Float32Array(256);
+          for (let i = 0; i < 256; i++) {
+            const x = (i * 2) / 256 - 1;
+            curve[i] = Math.tanh(x * 1.5);
+          }
+          waveshaper.curve = curve;
+
+          lastNode.connect(lowpass);
+          lowpass.connect(waveshaper);
+          lastNode = waveshaper;
+        } else if (isClone) {
+          // Clone: echo/double voice - play original + delayed pitch-shifted copy
+          source.playbackRate.value = 1.8;
+
+          // Slightly detune for ghostly/doubled feel
+          source.detune.value = -200; // 2 semitones down
+
+          // Reverb-like effect using delay + feedback
+          const delay = ctx.createDelay(1.0);
+          delay.delayTime.value = 0.08;
+
+          const feedback = ctx.createGain();
+          feedback.gain.value = 0.4;
+
+          const delayFilter = ctx.createBiquadFilter();
+          delayFilter.type = "highpass";
+          delayFilter.frequency.value = 400;
+
+          // Dry path
+          const dry = ctx.createGain();
+          dry.gain.value = 0.5;
+          lastNode.connect(dry);
+
+          // Wet path (delayed echo)
+          const wet = ctx.createGain();
+          wet.gain.value = 0.45;
+          lastNode.connect(delay);
+          delay.connect(delayFilter);
+          delayFilter.connect(wet);
+          delay.connect(feedback);
+          feedback.connect(delay);
+
+          // Merge dry + wet
+          const merger = ctx.createGain();
+          merger.gain.value = 1.0;
+          dry.connect(merger);
+          wet.connect(merger);
+          lastNode = merger;
+        }
+
+        const gain = ctx.createGain();
+        gain.gain.value = isDrunk ? 0.6 : isClone ? 0.65 : 0.55;
+        lastNode.connect(gain);
+        gain.connect(ctx.destination);
+
+        jumpPlayingRef.current = true;
+        source.onended = () => { jumpPlayingRef.current = false; };
+        source.start();
+        jumpSourceRef.current = source;
+        const dur = (source.buffer?.duration ?? 1) / source.playbackRate.value;
+        return { idx, durationMs: dur * 1000 };
+      }
+      // Fallback: buffers not ready, use HTMLAudioElement
+    }
+
+    // Normal mode (or fallback): HTMLAudioElement
+    const audio = pipeAudiosRef.current[idx];
+    if (!audio) return { idx: -1, durationMs: 0 };
+    audio.pause();
+    audio.currentTime = 0;
+    audio.playbackRate = 1.8;
+    audio.volume = 0.5;
+    jumpPlayingRef.current = true;
+    audio.onended = () => { jumpPlayingRef.current = false; };
+    audio.play().catch(() => {});
+    const dur = (audio.duration || 1) / 1.8;
+    return { idx, durationMs: dur * 1000 };
+  }, [enabled, getCtx]);
+
+  // Play jump sound (cecenq.mp3) with mode effects
+  const playCecenqAudio = useCallback((mode: "normal" | "drunk" | "shrink" | "clone" = "normal") => {
+    if (!enabled) return;
+    if (jumpPlayingRef.current) return;
+
+    if ((mode === "shrink" || mode === "clone") && jumpBufferRef.current) {
+      const ctx = getCtx();
+      if (ctx) {
+        const source = ctx.createBufferSource();
+        source.buffer = jumpBufferRef.current;
+        let lastNode: AudioNode = source;
+
+        if (mode === "shrink") {
+          source.playbackRate.value = 1.8;
+          const highpass = ctx.createBiquadFilter();
+          highpass.type = "highpass";
+          highpass.frequency.value = 900;
+          const peak = ctx.createBiquadFilter();
+          peak.type = "peaking";
+          peak.frequency.value = 2800;
+          peak.gain.value = 10;
+          peak.Q.value = 2.5;
+          lastNode.connect(highpass);
+          highpass.connect(peak);
+          lastNode = peak;
+        } else {
+          source.playbackRate.value = 1.0;
+          source.detune.value = -200;
+          const delay = ctx.createDelay(1.0);
+          delay.delayTime.value = 0.08;
+          const feedback = ctx.createGain();
+          feedback.gain.value = 0.4;
+          const dry = ctx.createGain();
+          dry.gain.value = 0.5;
+          const wet = ctx.createGain();
+          wet.gain.value = 0.45;
+          lastNode.connect(dry);
+          lastNode.connect(delay);
+          delay.connect(wet);
+          delay.connect(feedback);
+          feedback.connect(delay);
+          const merger = ctx.createGain();
+          dry.connect(merger);
+          wet.connect(merger);
+          lastNode = merger;
+        }
+
+        const gain = ctx.createGain();
+        gain.gain.value = 0.5;
+        lastNode.connect(gain);
+        gain.connect(ctx.destination);
+        source.start();
+        return;
+      }
+    }
+
+    // Normal / drunk: HTMLAudioElement
+    const audio = jumpAudioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.currentTime = 0;
+    audio.playbackRate = mode === "drunk" ? (0.6 + Math.random() * 0.3) : 1.0;
+    audio.volume = 0.5;
+    audio.play().catch(() => {});
+  }, [enabled, getCtx]);
+
+  const noop = useCallback(() => {}, []);
+
   return {
-    jump: useCallback(() => playTone(520, 0.08, "sine"), [playTone]),
-    score: useCallback(() => {
-      playTone(620, 0.08, "sine");
-      setTimeout(() => playTone(830, 0.12, "sine"), 70);
-    }, [playTone]),
-    hit: useCallback(() => playTone(180, 0.25, "sawtooth"), [playTone]),
-    click: useCallback(() => playTone(440, 0.04, "sine"), [playTone]),
-    coin: useCallback(() => {
-      playTone(880, 0.06, "sine");
-      setTimeout(() => playTone(1100, 0.08, "sine"), 50);
-      setTimeout(() => playTone(1320, 0.1, "sine"), 100);
-    }, [playTone]),
-    powerUp: useCallback(() => {
-      playTone(440, 0.1, "sine");
-      setTimeout(() => playTone(660, 0.1, "sine"), 80);
-      setTimeout(() => playTone(880, 0.15, "sine"), 160);
-    }, [playTone]),
-    shieldBreak: useCallback(() => {
-      playTone(300, 0.15, "triangle");
-      setTimeout(() => playTone(200, 0.2, "triangle"), 100);
-    }, [playTone]),
+    jump: playCecenqAudio,
+    score: playJumpAudio,
+    hit: noop,
+    click: noop,
+    coin: noop,
+    powerUp: noop,
   };
 }
+
+// Speech bubble words matching each pipe sound
+const SPEECH_WORDS = [
+  "CİBODENSO!",
+  "DAQADENSO!",
+  "DAQAQANDES!",
+  "DİBOQANDES!",
+  "LEBOBOMBA!",
+  "LOBOBOMBA!",
+  "LEBOQENEEEES!",
+  "DİBOQAMAYALLAAAAA!",
+];
 
 /* --- Stars component (deterministic) --- */
 const STARS = Array.from({ length: 50 }, (_, i) => ({
@@ -178,6 +466,14 @@ export default function FlappyBird() {
     lastFrameTime: 0,
     accumulator: 0,
     isDying: false,
+    invincibleFrames: 0,
+    enteredPipeIds: new Set<number>(),
+    // Intro: show each power-up in order for first-time experience
+    introQueue: shuffleIntro(),
+    introGiven: 0, // how many intro power-ups have been given
+    speechText: "" as string,
+    speechStartTime: 0, // performance.now() when speech started
+    speechDurationMs: 0, // total duration matching the sound
   });
 
   const animRef = useRef<number>(0);
@@ -194,7 +490,12 @@ export default function FlappyBird() {
     function handleResize() {
       const maxW = window.innerWidth;
       const maxH = window.innerHeight;
-      const s = Math.min(maxW / GAME_WIDTH, maxH / GAME_HEIGHT);
+      const isPortrait = maxH > maxW;
+      // Portrait (mobile): cover entire screen, no gaps
+      // Landscape (desktop): fit inside screen
+      const s = isPortrait
+        ? Math.max(maxW / GAME_WIDTH, maxH / GAME_HEIGHT)
+        : Math.min(maxW / GAME_WIDTH, maxH / GAME_HEIGHT);
       setCssWidth(Math.round(GAME_WIDTH * s));
       setCssHeight(Math.round(GAME_HEIGHT * s));
     }
@@ -217,18 +518,17 @@ export default function FlappyBird() {
     // Progressive speed: +4% every 5 points, capped at +35%
     const speedBoost = 1 + Math.min(Math.floor(gs.score / 5) * 0.04, 0.35);
 
-    // Slowdown power-up
-    const isSlowed = hasActivePowerUp(gs.activePowerUps, "slowdown");
-    const slowMult = isSlowed ? SLOWDOWN_FACTOR : 1;
+    // Clone power-up
+    const hasClone = hasActivePowerUp(gs.activePowerUps, "clone");
 
-    const currentSpeed = diff.speed * speedBoost * slowMult;
+    const currentSpeed = diff.speed * speedBoost;
     const currentGravity = diff.gravity * (1 + Math.min(Math.floor(gs.score / 15) * 0.03, 0.18));
 
     // Progressive gap shrink: gap decreases with score, but never below MIN_GAP
     const currentGap = Math.max(diff.gap - gs.score * GAP_SHRINK_PER_SCORE, MIN_GAP);
 
     const isShrunk = hasActivePowerUp(gs.activePowerUps, "shrink");
-    const hasShield = hasActivePowerUp(gs.activePowerUps, "shield");
+    const isDrunk = hasActivePowerUp(gs.activePowerUps, "drunk");
 
     if (gs.lastFrameTime === 0) gs.lastFrameTime = timestamp;
     const delta = Math.min(timestamp - gs.lastFrameTime, 50);
@@ -251,14 +551,28 @@ export default function FlappyBird() {
 
       if (gs.isRunning && !gs.waitingForStart) {
         gs.bird = updateBird(gs.bird, currentGravity);
+        // Drunk effect: gentle wobble + continuous spin
+        if (isDrunk) {
+          const wobble = Math.sin(gs.frame * 0.08) * 1.0;
+          const spinRotation = (gs.frame * 7) % 360; // fast spin
+          gs.bird = { ...gs.bird, y: gs.bird.y + wobble, rotation: spinRotation };
+        }
         gs.pipes = updatePipes(gs.pipes, currentSpeed, gs.frame);
         gs.coins = updateCoins(gs.coins, gs.pipes, currentSpeed, currentGap);
         gs.powerUps = updatePowerUps(gs.powerUps, gs.pipes, currentSpeed, currentGap);
         gs.particles = updateParticles(gs.particles);
         gs.combo = updateComboDisplay(gs.combo);
 
-        // Expire timed power-ups
+        // Expire timed power-ups; reset cooldown when a power-up expires
+        const hadDrunk = hasActivePowerUp(gs.activePowerUps, "drunk");
+        const prevCount = gs.activePowerUps.length;
         gs.activePowerUps = getActivePowerUps(gs.activePowerUps, performance.now());
+        if (gs.activePowerUps.length < prevCount) {
+          gs.lastPowerUpTime = performance.now();
+        }
+        if (hadDrunk && !hasActivePowerUp(gs.activePowerUps, "drunk")) {
+          // drunk bg removed
+        }
 
         if (gs.shakeFrames > 0) gs.shakeFrames--;
         gs.bgOffset += currentSpeed;
@@ -274,7 +588,7 @@ export default function FlappyBird() {
 
     if (gs.isRunning && !gs.waitingForStart && !gs.isDying) {
       // Spawn pipes
-      const pipeInterval = Math.max(2800 / speedBoost, 1800);
+      const pipeInterval = Math.max(2800 / speedBoost, 2000);
       if (timestamp - gs.lastPipeTime > pipeInterval) {
         const newPipe = createPipe(GAME_HEIGHT, currentGap, gs.score);
         gs.pipes = [...gs.pipes, newPipe];
@@ -282,9 +596,14 @@ export default function FlappyBird() {
         if (Math.random() < 0.7 || newPipe.isBoss) {
           gs.coins = [...gs.coins, createCoin(newPipe, currentGap)];
         }
-        // Spawn power-up in pipe gap (~15s interval)
-        if (timestamp - gs.lastPowerUpTime > POWERUP_SPAWN_INTERVAL) {
-          gs.powerUps = [...gs.powerUps, createPowerUp(newPipe, currentGap)];
+        // Spawn power-up only if no active power-ups and cooldown passed
+        const hasAnyPowerUp = gs.activePowerUps.length > 0;
+        const introActive = gs.introGiven < gs.introQueue.length;
+        const spawnInterval = introActive ? 3000 : POWERUP_SPAWN_INTERVAL; // faster during intro
+        if (!hasAnyPowerUp && timestamp - gs.lastPowerUpTime > spawnInterval) {
+          const forceType = introActive ? gs.introQueue[gs.introGiven] : undefined;
+          gs.powerUps = [...gs.powerUps, createPowerUp(newPipe, currentGap, forceType)];
+          if (introActive) gs.introGiven++;
           gs.lastPowerUpTime = timestamp;
         }
         gs.lastPipeTime = timestamp;
@@ -298,7 +617,6 @@ export default function FlappyBird() {
         gs.score = scoreResult.score;
         setScore(gs.score);
         gs.particles = [...gs.particles, ...createScoreParticles(gs.bird.y)];
-        sound.score();
       }
 
       // Check coin collection
@@ -323,7 +641,7 @@ export default function FlappyBird() {
         const now = performance.now();
         const newActive: ActivePowerUp = {
           type: puResult.collected,
-          expiresAt: puResult.collected === "shield" ? 0 : now + POWERUP_DURATION,
+          expiresAt: now + (puResult.collected === "shrink" ? SHRINK_DURATION : puResult.collected === "clone" ? CLONE_DURATION : puResult.collected === "drunk" ? DRUNK_DURATION : POWERUP_DURATION),
         };
         // Replace existing of same type, or add
         const filtered = gs.activePowerUps.filter((a) => a.type !== puResult.collected);
@@ -331,30 +649,60 @@ export default function FlappyBird() {
         sound.powerUp();
       }
 
-      // Check collision
-      const collisionResult = checkCollision(gs.bird, gs.pipes, currentGap, hasShield, isShrunk);
-
-      if (collisionResult.shieldUsed) {
-        gs.activePowerUps = removeShield(gs.activePowerUps);
-        gs.shakeFrames = 8;
-        sound.shieldBreak();
+      // Detect bird entering a pipe gap - uses live power-up state for instant sound change
+      const liveShrunk = hasActivePowerUp(gs.activePowerUps, "shrink");
+      const liveDrunk = hasActivePowerUp(gs.activePowerUps, "drunk");
+      const liveClone = hasActivePowerUp(gs.activePowerUps, "clone");
+      for (const pipe of gs.pipes) {
+        if (!gs.enteredPipeIds.has(pipe.id)) {
+          const birdRight = BIRD_X + BIRD_WIDTH;
+          if (birdRight > pipe.x && BIRD_X < pipe.x + pipe.width) {
+            gs.enteredPipeIds.add(pipe.id);
+            const sndResult = sound.score(liveShrunk, liveDrunk, liveClone);
+            if (sndResult.idx >= 0 && sndResult.idx < SPEECH_WORDS.length) {
+              gs.speechText = SPEECH_WORDS[sndResult.idx];
+              gs.speechStartTime = performance.now();
+              gs.speechDurationMs = sndResult.durationMs;
+            }
+          }
+        }
       }
 
-      if (collisionResult.collided) {
-        gs.isRunning = false;
-        gs.isDying = true;
-        gs.deathAnim = createDeathAnimation(gs.bird.y);
-        gs.particles = [...gs.particles, ...createDeathParticles(gs.bird.y)];
-        gs.shakeFrames = 15;
-        gs.combo = createComboState(); // Reset combo
-        sound.hit();
-        const isNew = gs.score > getHighScore();
-        if (isNew) { saveHighScore(gs.score); setHighScore(gs.score); setIsNewHighScore(true); }
-        else setIsNewHighScore(false);
-        setTimeout(() => {
-          gs.isDying = false;
-          setScreen("gameover");
-        }, 500);
+      // Tick invincibility
+      if (gs.invincibleFrames > 0) gs.invincibleFrames--;
+
+      // Check collision (skip while invincible)
+      if (gs.invincibleFrames <= 0) {
+        const collided = checkCollision(gs.bird, gs.pipes, currentGap, isShrunk);
+
+        if (collided) {
+          if (hasClone) {
+            // Clone saves you - teleport to safe position, consume clone
+            const safeY = Math.max(80, Math.min(gs.bird.y + CLONE_Y_OFFSET, GAME_HEIGHT - GROUND_HEIGHT - BIRD_HEIGHT - 20));
+            gs.bird = { ...gs.bird, y: safeY, velocity: 0, rotation: 0 };
+            gs.activePowerUps = gs.activePowerUps.filter((a) => a.type !== "clone");
+            gs.invincibleFrames = 45; // ~0.75s invincibility after clone rescue
+            gs.shakeFrames = 10;
+            gs.particles = [...gs.particles, ...createDeathParticles(safeY)];
+            sound.hit();
+          } else {
+            gs.isRunning = false;
+            gs.isDying = true;
+            // drunk bg removed
+            gs.deathAnim = createDeathAnimation(gs.bird.y);
+            gs.particles = [...gs.particles, ...createDeathParticles(gs.bird.y)];
+            gs.shakeFrames = 15;
+            gs.combo = createComboState(); // Reset combo
+            sound.hit();
+            const isNew = gs.score > getHighScore();
+            if (isNew) { saveHighScore(gs.score); setHighScore(gs.score); setIsNewHighScore(true); }
+            else setIsNewHighScore(false);
+            setTimeout(() => {
+              gs.isDying = false;
+              setScreen("gameover");
+            }, 500);
+          }
+        }
       }
     }
 
@@ -362,6 +710,14 @@ export default function FlappyBird() {
     ctx.save();
     if (gs.shakeFrames > 0) {
       ctx.translate((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8);
+    }
+    // Drunk screen wobble (gentle)
+    if (isDrunk && !gs.isDying) {
+      const wobbleAngle = Math.sin(gs.frame * 0.03) * 0.02;
+      const wobbleX = Math.sin(gs.frame * 0.05) * 3;
+      ctx.translate(GAME_WIDTH / 2 + wobbleX, GAME_HEIGHT / 2);
+      ctx.rotate(wobbleAngle);
+      ctx.translate(-GAME_WIDTH / 2, -GAME_HEIGHT / 2);
     }
 
     drawBackground(ctx, gs.bgOffset, gs.score);
@@ -376,12 +732,86 @@ export default function FlappyBird() {
 
     drawGround(ctx, gs.bgOffset);
 
-    // Draw bird with shield glow
-    if (hasShield && !gs.isDying) {
-      drawShieldGlow(ctx, gs.bird, gs.frame);
+    if (hasClone && !gs.isDying) {
+      drawCloneBird(ctx, gs.bird, gs.frame, CLONE_Y_OFFSET, isShrunk);
+    }
+    drawBird(ctx, gs.bird, gs.frame, isShrunk, gs.isDying ? gs.deathAnim : null, isDrunk);
+
+    // Dancing letters synced with sound duration
+    if (gs.speechText && gs.speechDurationMs > 0) {
+      const now = performance.now();
+      const elapsedMs = now - gs.speechStartTime;
+      const totalMs = gs.speechDurationMs;
+      if (elapsedMs < totalMs + 300) { // +300ms fade-out
+        const allLetters = gs.speechText;
+        const len = allLetters.length;
+        const revealProgress = Math.min(1, elapsedMs / (totalMs * 0.85));
+        const revealedCount = Math.min(len, Math.floor(revealProgress * len) + 1);
+        const fadeAlpha = elapsedMs > totalMs ? Math.max(0, 1 - (elapsedMs - totalMs) / 300) : 1;
+
+        ctx.save();
+        ctx.globalAlpha = fadeAlpha;
+
+        const fontSize = len > 14 ? 28 : len > 10 ? 32 : 36;
+        ctx.font = `900 ${fontSize}px "Impact", "Arial Black", sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        const centerX = GAME_WIDTH / 2;
+        const centerY = GAME_HEIGHT - GROUND_HEIGHT - 60; // aşağıda, ground-un üstündə
+
+        let totalWidth = 0;
+        const letterWidths: number[] = [];
+        for (let i = 0; i < revealedCount; i++) {
+          const w = ctx.measureText(allLetters[i]).width;
+          letterWidths.push(w);
+          totalWidth += w;
+        }
+
+        let curX = centerX - totalWidth / 2;
+
+        for (let i = 0; i < revealedCount; i++) {
+          const letterAppearMs = (i / len) * totalMs * 0.85;
+          const letterAgeMs = elapsedMs - letterAppearMs;
+          // Pop-in: big → normal with bounce
+          let scale = 1.0;
+          if (letterAgeMs < 80) {
+            scale = 1.8 - (letterAgeMs / 80) * 0.8;
+          } else if (letterAgeMs < 150) {
+            scale = 1.0 + ((150 - letterAgeMs) / 70) * 0.15;
+          }
+          // Dance bob + wiggle
+          const t = elapsedMs / 1000;
+          const bob = Math.sin((t * 8) + i * 1.2) * 5;
+          const wiggle = Math.sin((t * 6) + i * 1.8) * 0.12;
+
+          const lx = curX + letterWidths[i] / 2;
+          const ly = centerY + bob;
+
+          ctx.save();
+          ctx.translate(lx, ly);
+          ctx.rotate(wiggle);
+          ctx.scale(scale, scale);
+
+          ctx.strokeStyle = "rgba(0,0,0,0.85)";
+          ctx.lineWidth = 4;
+          ctx.lineJoin = "round";
+          ctx.strokeText(allLetters[i], 0, 0);
+          ctx.fillStyle = "#fff";
+          ctx.fillText(allLetters[i], 0, 0);
+
+          ctx.restore();
+          curX += letterWidths[i];
+        }
+
+        ctx.restore();
+      } else {
+        // Speech finished, clear it
+        gs.speechText = "";
+        gs.speechDurationMs = 0;
+      }
     }
 
-    drawBird(ctx, gs.bird, gs.frame, isShrunk, gs.isDying ? gs.deathAnim : null);
     drawParticles(ctx, gs.particles);
 
     if ((gs.isRunning || gs.isDying) && !gs.waitingForStart) {
@@ -395,6 +825,30 @@ export default function FlappyBird() {
     // Death screen flash
     if (gs.deathAnim && gs.deathAnim.flashAlpha > 0) {
       drawScreenFlash(ctx, gs.deathAnim.flashAlpha);
+    }
+
+    // Drunk vision overlay
+    if (isDrunk && !gs.isDying) {
+      ctx.save();
+      // Pulsating green-purple tint
+      const tintAlpha = 0.12 + Math.sin(gs.frame * 0.05) * 0.05;
+      ctx.globalAlpha = tintAlpha;
+      ctx.globalCompositeOperation = "multiply";
+      ctx.fillStyle = "#88ff44";
+      ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+      // Second layer: purple vignette edges
+      ctx.globalCompositeOperation = "screen";
+      ctx.globalAlpha = 0.08 + Math.sin(gs.frame * 0.03 + 1) * 0.04;
+      const vignette = ctx.createRadialGradient(
+        GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_HEIGHT * 0.2,
+        GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_HEIGHT * 0.6
+      );
+      vignette.addColorStop(0, "transparent");
+      vignette.addColorStop(1, "#cc44cc");
+      ctx.fillStyle = vignette;
+      ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+      ctx.restore();
     }
 
     ctx.restore();
@@ -415,7 +869,7 @@ export default function FlappyBird() {
     gs.bird = createBird(GAME_HEIGHT / 2 - 50);
     gs.pipes = []; gs.particles = []; gs.coins = []; gs.powerUps = [];
     gs.activePowerUps = []; gs.combo = createComboState();
-    gs.deathAnim = null; gs.isDying = false;
+    gs.deathAnim = null; gs.isDying = false; gs.invincibleFrames = 0; gs.enteredPipeIds.clear();
     gs.score = 0; gs.frame = 0;
     gs.isRunning = true; gs.waitingForStart = true;
     const canvas = canvasRef.current;
@@ -440,7 +894,8 @@ export default function FlappyBird() {
     gs.bird = createBird(GAME_HEIGHT / 2 - 50);
     gs.pipes = []; gs.particles = []; gs.coins = []; gs.powerUps = [];
     gs.activePowerUps = []; gs.combo = createComboState();
-    gs.deathAnim = null; gs.isDying = false;
+    gs.deathAnim = null; gs.isDying = false; gs.invincibleFrames = 0; gs.enteredPipeIds.clear();
+    gs.introQueue = shuffleIntro(); gs.introGiven = 0;
     gs.score = 0; gs.frame = 0;
     gs.isRunning = true; gs.waitingForStart = true;
     gs.lastPipeTime = performance.now();
@@ -459,7 +914,15 @@ export default function FlappyBird() {
       gs.lastPowerUpTime = performance.now();
     }
     gs.bird = jumpBird(gs.bird);
-    sound.jump();
+    // Drunk: randomize jump force a bit
+    if (hasActivePowerUp(gs.activePowerUps, "drunk")) {
+      const randomMult = 0.85 + Math.random() * 0.3; // 0.85x to 1.15x
+      gs.bird = { ...gs.bird, velocity: gs.bird.velocity * randomMult };
+    }
+    const jumpMode = hasActivePowerUp(gs.activePowerUps, "drunk") ? "drunk"
+      : hasActivePowerUp(gs.activePowerUps, "shrink") ? "shrink"
+      : hasActivePowerUp(gs.activePowerUps, "clone") ? "clone" : "normal";
+    sound.jump(jumpMode);
   }, [sound]);
 
   useEffect(() => {

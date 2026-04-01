@@ -97,9 +97,8 @@ export function checkCollision(
   bird: Bird,
   pipes: readonly Pipe[],
   gap: number,
-  hasShield: boolean,
   isShrunk: boolean
-): { collided: boolean; shieldUsed: boolean } {
+): boolean {
   const groundY = GAME_HEIGHT - GROUND_HEIGHT;
   const scale = isShrunk ? SHRINK_SCALE : 1;
   const effectiveW = BIRD_WIDTH * scale;
@@ -107,9 +106,9 @@ export function checkCollision(
   const offsetX = (BIRD_WIDTH - effectiveW) / 2;
   const offsetY = (BIRD_HEIGHT - effectiveH) / 2;
 
-  // Ground/ceiling — always fatal, no shield
+  // Ground/ceiling
   if (bird.y + offsetY + effectiveH > groundY || bird.y + offsetY < 0) {
-    return { collided: true, shieldUsed: false };
+    return true;
   }
 
   // Pipes
@@ -124,15 +123,12 @@ export function checkCollision(
 
     if (birdRight > pipe.x && birdLeft < pipe.x + pipe.width) {
       if (birdTop < pipe.topHeight || birdBottom > pipe.topHeight + effectiveGap) {
-        if (hasShield) {
-          return { collided: false, shieldUsed: true };
-        }
-        return { collided: true, shieldUsed: false };
+        return true;
       }
     }
   }
 
-  return { collided: false, shieldUsed: false };
+  return false;
 }
 
 export function checkScore(
@@ -268,17 +264,16 @@ export function checkCoinCollision(
 
 // ─── Power-ups ───
 
-export function createPowerUp(pipe: Pipe, gap: number): PowerUp {
-  const types: PowerUpType[] = ["shield", "shrink", "slowdown"];
-  const type = types[Math.floor(Math.random() * types.length)];
+export function createPowerUp(pipe: Pipe, gap: number, forceType?: PowerUpType): PowerUp {
+  const types: PowerUpType[] = ["drunk", "shrink", "clone"];
+  const type = forceType ?? types[Math.floor(Math.random() * types.length)];
   const effectiveGap = pipe.isBoss ? gap - BOSS_GAP_REDUCTION : gap;
-  // Place power-up in the pipe gap, slightly offset from center
+  // Place power-up BEFORE the pipe (between pipes) so player collects it before entering
   const gapCenter = pipe.topHeight + effectiveGap / 2;
-  const offset = (Math.random() - 0.5) * (effectiveGap * 0.4);
-  const y = gapCenter + offset;
+  const y = gapCenter;
 
   return {
-    x: pipe.x + pipe.width / 2,
+    x: pipe.x - 80, // 80px before the pipe
     y,
     type,
     collected: false,
@@ -297,16 +292,11 @@ export function updatePowerUps(
   return powerUps
     .map((p) => {
       const newPhase = p.animPhase + 0.05;
-      // Track associated pipe position (for moving pipes)
+      // Move with pipe speed, bob up and down
       const pipe = pipes.find((pp) => pp.id === p.pipeId);
-      if (pipe) {
-        const effectiveGap = pipe.isBoss ? gap - BOSS_GAP_REDUCTION : gap;
-        const gapCenter = pipe.topHeight + effectiveGap / 2;
-        const bobY = gapCenter + Math.sin(newPhase) * 8;
-        return { ...p, x: pipe.x + pipe.width / 2, y: bobY, animPhase: newPhase };
-      }
-      const bobY = p.baseY + Math.sin(newPhase) * 8;
-      return { ...p, x: p.x - speed, y: bobY, animPhase: newPhase };
+      const newX = pipe ? pipe.x - 80 : p.x - speed;
+      const bobY = p.baseY + Math.sin(newPhase) * 10;
+      return { ...p, x: newX, y: bobY, animPhase: newPhase };
     })
     .filter((p) => !p.collected && p.x > -30);
 }
@@ -332,7 +322,7 @@ export function checkPowerUpCollision(
     const dy = birdCY - p.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
-    if (dist < POWERUP_SIZE + effectiveW / 2 - 10) {
+    if (dist < POWERUP_SIZE + effectiveW / 2 + 15) {
       collectedType = p.type;
       return { ...p, collected: true };
     }
@@ -347,7 +337,6 @@ export function getActivePowerUps(
   now: number
 ): readonly ActivePowerUp[] {
   return actives.filter((a) => {
-    if (a.type === "shield") return true; // Shield stays until used
     return a.expiresAt > now;
   });
 }
@@ -357,14 +346,6 @@ export function hasActivePowerUp(
   type: PowerUpType
 ): boolean {
   return actives.some((a) => a.type === type);
-}
-
-export function removeShield(
-  actives: readonly ActivePowerUp[]
-): readonly ActivePowerUp[] {
-  const idx = actives.findIndex((a) => a.type === "shield");
-  if (idx === -1) return actives;
-  return [...actives.slice(0, idx), ...actives.slice(idx + 1)];
 }
 
 // ─── Death animation ───

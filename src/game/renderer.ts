@@ -385,9 +385,9 @@ export function drawCoin(ctx: CanvasRenderingContext2D, coin: Coin) {
 // ─── Power-up drawing ───
 
 const POWERUP_COLORS: Record<string, { bg: string; glow: string; icon: string }> = {
-  shield: { bg: "#4488ff", glow: "rgba(68,136,255,0.6)", icon: "S" },
+  drunk: { bg: "#cc44cc", glow: "rgba(204,68,204,0.6)", icon: "D" },
   shrink: { bg: "#44cc44", glow: "rgba(68,204,68,0.6)", icon: "s" },
-  slowdown: { bg: "#ff8844", glow: "rgba(255,136,68,0.6)", icon: "~" },
+  clone: { bg: "#00c8ff", glow: "rgba(0,200,255,0.6)", icon: "C" },
 };
 
 export function drawPowerUp(ctx: CanvasRenderingContext2D, powerUp: PowerUp) {
@@ -425,13 +425,12 @@ export function drawPowerUp(ctx: CanvasRenderingContext2D, powerUp: PowerUp) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
-  if (powerUp.type === "shield") {
-    // Shield icon
-    ctx.fillText("\u{1F6E1}", 0, 0);
+  if (powerUp.type === "drunk") {
+    ctx.fillText("\u{1F37B}", 0, 0); // beer mugs
   } else if (powerUp.type === "shrink") {
     ctx.fillText("\u2B07", 0, 0);
   } else {
-    ctx.fillText("\u23F1", 0, 0);
+    ctx.fillText("\u{1F465}", 0, 0);
   }
 
   ctx.restore();
@@ -450,14 +449,11 @@ export function drawPowerUpIndicator(
   for (const active of actives) {
     const colors = POWERUP_COLORS[active.type];
     const label =
-      active.type === "shield" ? "SHIELD" :
-      active.type === "shrink" ? "SHRINK" : "SLOW";
+      active.type === "drunk" ? "PIYAN" :
+      active.type === "shrink" ? "SHRINK" : "CLONE";
 
-    let timeText = "";
-    if (active.type !== "shield") {
-      const remaining = Math.max(0, Math.ceil((active.expiresAt - now) / 1000));
-      timeText = ` ${remaining}s`;
-    }
+    const remaining = Math.max(0, Math.ceil((active.expiresAt - now) / 1000));
+    const timeText = ` ${remaining}s`;
 
     ctx.save();
     ctx.globalAlpha = 0.85;
@@ -479,34 +475,6 @@ export function drawPowerUpIndicator(
   }
 }
 
-// ─── Shield glow around bird ───
-
-export function drawShieldGlow(ctx: CanvasRenderingContext2D, bird: Bird, frame: number) {
-  ctx.save();
-  const cx = BIRD_X + BIRD_WIDTH / 2;
-  const cy = bird.y + BIRD_HEIGHT / 2;
-  const pulse = 1 + Math.sin(frame * 0.1) * 0.1;
-  const radius = (BIRD_WIDTH / 2 + 10) * pulse;
-
-  ctx.strokeStyle = "rgba(68, 136, 255, 0.6)";
-  ctx.lineWidth = 3;
-  ctx.shadowColor = "rgba(68, 136, 255, 0.5)";
-  ctx.shadowBlur = 15;
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // Inner glow
-  ctx.strokeStyle = "rgba(100, 170, 255, 0.3)";
-  ctx.lineWidth = 6;
-  ctx.shadowBlur = 0;
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius - 2, 0, Math.PI * 2);
-  ctx.stroke();
-
-  ctx.restore();
-}
-
 // ─── Cached cibom image ───
 
 let cibomImage: HTMLImageElement | null = null;
@@ -525,7 +493,8 @@ export function drawBird(
   bird: Bird,
   frame: number,
   isShrunk: boolean = false,
-  deathAnim: DeathAnimation | null = null
+  deathAnim: DeathAnimation | null = null,
+  isDrunk: boolean = false
 ) {
   ctx.save();
 
@@ -538,6 +507,8 @@ export function drawBird(
   let rot: number;
   if (deathAnim?.active) {
     rot = deathAnim.extraRotation;
+  } else if (isDrunk) {
+    rot = bird.rotation; // unclamped full 360 spin
   } else {
     rot = Math.min(Math.max(bird.rotation, -20), 45);
   }
@@ -564,6 +535,50 @@ export function drawBird(
     ctx.drawImage(img, -BIRD_WIDTH / 2, -BIRD_HEIGHT / 2, BIRD_WIDTH, BIRD_HEIGHT);
   } else {
     ctx.fillStyle = "rgba(100,100,100,0.5)";
+    ctx.beginPath();
+    ctx.arc(0, 0, BIRD_WIDTH / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+export function drawCloneBird(
+  ctx: CanvasRenderingContext2D,
+  bird: Bird,
+  frame: number,
+  yOffset: number,
+  isShrunk: boolean = false
+) {
+  ctx.save();
+  ctx.globalAlpha = 0.55;
+
+  const scale = isShrunk ? 0.6 : 1;
+  const drawY = bird.y + yOffset;
+
+  ctx.translate(BIRD_X + BIRD_WIDTH / 2, drawY + BIRD_HEIGHT / 2);
+
+  const rot = Math.min(Math.max(bird.rotation, -20), 45);
+  ctx.rotate((rot * Math.PI) / 180);
+  ctx.scale(scale, scale);
+
+  const bob = Math.sin(frame * 0.15 + 1.5) * 1.5;
+  ctx.translate(0, bob);
+
+  const img = getCibomImage();
+
+  if (img) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+
+    ctx.shadowColor = "rgba(0,200,255,0.7)";
+    ctx.shadowBlur = 18;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+
+    ctx.drawImage(img, -BIRD_WIDTH / 2, -BIRD_HEIGHT / 2, BIRD_WIDTH, BIRD_HEIGHT);
+  } else {
+    ctx.fillStyle = "rgba(0,200,255,0.5)";
     ctx.beginPath();
     ctx.arc(0, 0, BIRD_WIDTH / 2, 0, Math.PI * 2);
     ctx.fill();
