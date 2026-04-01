@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+:root {
+  --font-display: var(--font-fredoka), "Fredoka", sans-serif;
+  --font-body: var(--font-nunito), "Nunito", sans-serif;
+
+  /* Arcade palette */
+  --sky: #4ec0ca;
+  --gold: #ffcc33;
+  --gold-dark: #cc9900;
+  --green: #6ecf5c;
+  --green-dark: #3a9c2c;
+  --coral: #ff6b6b;
+  --coral-dark: #cc3b3b;
+  --navy: #1a1a3e;
+  --navy-deep: #0d0d24;
+  --cream: #fff8ee;
+  --brown: #8b6914;
+  --brown-light: #c4935f;
+}
+
+@theme inline {
+  --color-background: var(--sky);
+  --color-foreground: #ffffff;
+  --font-sans: var(--font-body);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+canvas {
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+body {
+  background: var(--navy-deep);
+  color: #ffffff;
+  font-family: var(--font-body);
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* ──────── Keyframes ──────── */
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes floatSlow {
+  0%, 100% { transform: translateY(0px) rotate(-1deg); }
+  50% { transform: translateY(-12px) rotate(1deg); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 20px rgba(255, 204, 51, 0.3), 0 6px 0 var(--green-dark); }
+  50% { box-shadow: 0 0 35px rgba(255, 204, 51, 0.5), 0 6px 0 var(--green-dark); }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  0% { opacity: 0; transform: scale(0.85); }
+  60% { transform: scale(1.03); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes twinkle {
+  0%, 100% { opacity: 0.15; transform: scale(0.8); }
+  50% { opacity: 0.7; transform: scale(1.2); }
+}
+
+@keyframes spinStar {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes medal-shine {
+  0% { transform: rotate(-5deg) scale(1); }
+  25% { transform: rotate(5deg) scale(1.1); }
+  50% { transform: rotate(-3deg) scale(1); }
+  100% { transform: rotate(0deg) scale(1); }
+}
+
+@keyframes count-up {
+  from { transform: scale(0.5); opacity: 0; }
+  60% { transform: scale(1.15); }
+  to { transform: scale(1); opacity: 1; }
+}
