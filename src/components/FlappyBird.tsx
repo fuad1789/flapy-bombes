@@ -1009,7 +1009,7 @@ export default function FlappyBird() {
                 </h1>
                 <h1 style={{
                   fontFamily: "var(--font-display)",
-                  fontSize: 62,
+                  fontSize: 38,
                   fontWeight: 700,
                   color: "#fff",
                   textAlign: "center",
@@ -1022,19 +1022,39 @@ export default function FlappyBird() {
                     0 8px 15px rgba(0,0,0,0.3),
                     0 0 40px rgba(110,207,92,0.25)
                   `,
-                  letterSpacing: 6,
+                  letterSpacing: 3,
                 }}>
-                  BIRD
+                  CİBOBOMBES
                 </h1>
               </div>
+            </div>
+
+            {/* Character Image */}
+            <div style={{
+              animation: "scaleIn 0.6s ease-out 0.15s both",
+              marginTop: 12,
+              display: "flex",
+              justifyContent: "center",
+            }}>
+              <img
+                src="/karikatura.png"
+                alt="Karakter"
+                style={{
+                  width: 180,
+                  height: "auto",
+                  objectFit: "contain",
+                  filter: "drop-shadow(0 6px 20px rgba(0,0,0,0.4))",
+                  animation: "floatSlow 3s ease-in-out infinite",
+                }}
+              />
             </div>
 
             {/* High Score Chip */}
             <div
               style={{
                 animation: "slideUp 0.5s ease-out 0.2s both",
-                marginTop: 32,
-                marginBottom: 28,
+                marginTop: 16,
+                marginBottom: 20,
               }}
             >
               <Chip icon="👑" text={`Rekord: ${highScore}`} />
