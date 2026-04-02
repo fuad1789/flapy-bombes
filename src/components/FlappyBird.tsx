@@ -62,7 +62,10 @@ import {
   saveDifficulty,
   getSoundEnabled,
   saveSoundEnabled,
+  getSavedPlayerName,
+  savePlayerName,
 } from "@/game/engine";
+import { fetchLeaderboard, submitScore, isNameTaken, registerPlayer, type LeaderboardEntry } from "@/game/supabase-leaderboard";
 import {
   drawBackground,
   drawGround,
@@ -442,7 +445,13 @@ export default function FlappyBird() {
   const [soundOn, setSoundOn] = useState(true);
   const [isNewHighScore, setIsNewHighScore] = useState(false);
   const [playerName, setPlayerName] = useState("");
-  const [leaderboard, setLeaderboard] = useState<readonly { name: string; score: number }[]>([]);
+  const [hasName, setHasName] = useState(false);
+  const [leaderboard, setLeaderboard] = useState<readonly LeaderboardEntry[]>([]);
+  const [leaderboardLoading, setLeaderboardLoading] = useState(false);
+  const [scoreSaved, setScoreSaved] = useState(false);
+  const [showNamePopup, setShowNamePopup] = useState(false);
+  const [nameError, setNameError] = useState("");
+  const [nameChecking, setNameChecking] = useState(false);
   const [cssWidth, setCssWidth] = useState(GAME_WIDTH);
   const [cssHeight, setCssHeight] = useState(GAME_HEIGHT);
 
@@ -483,7 +492,14 @@ export default function FlappyBird() {
     setHighScore(getHighScore());
     setDifficulty(getSavedDifficulty());
     setSoundOn(getSoundEnabled());
-    setLeaderboard(getLeaderboard());
+    const savedName = getSavedPlayerName();
+    if (savedName) {
+      setPlayerName(savedName);
+      setHasName(true);
+    } else {
+      setShowNamePopup(true);
+    }
+    fetchLeaderboard().then(setLeaderboard);
   }, []);
 
   useEffect(() => {
@@ -901,7 +917,7 @@ export default function FlappyBird() {
     gs.lastPipeTime = performance.now();
     gs.lastPowerUpTime = performance.now();
     gs.lastFrameTime = 0; gs.accumulator = 0;
-    setScore(0); setIsNewHighScore(false); setScreen("playing");
+    setScore(0); setIsNewHighScore(false); setScoreSaved(false); setScreen("playing");
     sound.click();
   }, [sound]);
 
@@ -937,11 +953,55 @@ export default function FlappyBird() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [screen, handleJump, startGame]);
 
-  function handleSaveScore() {
+  async function handleNameSubmit() {
+    const n = playerName.trim();
+    if (!n) { setNameError("Ad boş ola bilməz"); return; }
+    setNameChecking(true);
+    setNameError("");
+    const taken = await isNameTaken(n);
+    if (taken) {
+      setNameError("Bu ad artıq istifadə olunur!");
+      setNameChecking(false);
+      return;
+    }
+    savePlayerName(n);
+    setHasName(true);
+    setShowNamePopup(false);
+    setNameChecking(false);
+    sound.click();
+    await registerPlayer(n);
+    const fresh = await fetchLeaderboard();
+    setLeaderboard(fresh);
+  }
+
+  async function handleSaveScore() {
     if (!playerName.trim()) return;
-    addToLeaderboard(playerName.trim(), score);
-    setLeaderboard(getLeaderboard());
-    setPlayerName(""); setScreen("leaderboard"); sound.click();
+    const name = playerName.trim();
+    // Save name permanently on first use
+    if (!hasName) {
+      savePlayerName(name);
+      setHasName(true);
+    }
+    // Save to Supabase
+    setScoreSaved(true);
+    await submitScore(name, score);
+    // Also keep local copy
+    addToLeaderboard(name, score);
+    // Refresh from Supabase
+    const fresh = await fetchLeaderboard();
+    setLeaderboard(fresh);
+    setScreen("leaderboard");
+    sound.click();
+  }
+
+  // Auto-save score if player already has a name
+  async function handleAutoSaveAndReplay() {
+    if (hasName && !scoreSaved) {
+      setScoreSaved(true);
+      await submitScore(playerName.trim(), score);
+      addToLeaderboard(playerName.trim(), score);
+    }
+    startGame();
   }
 
   const getMedal = (s: number) => {
@@ -1080,7 +1140,7 @@ export default function FlappyBird() {
               <GlassButton onClick={() => { setScreen("settings"); sound.click(); }}>
                 {"⚙️  Ayarlar"}
               </GlassButton>
-              <GlassButton onClick={() => { setLeaderboard(getLeaderboard()); setScreen("leaderboard"); sound.click(); }}>
+              <GlassButton onClick={async () => { setScreen("leaderboard"); setLeaderboardLoading(true); sound.click(); const fresh = await fetchLeaderboard(); setLeaderboard(fresh); setLeaderboardLoading(false); }}>
                 {"🏆  Lider"}
               </GlassButton>
             </div>
@@ -1120,8 +1180,8 @@ export default function FlappyBird() {
               />
             </div>
 
-            {/* Name input */}
-            {score > 0 && (
+            {/* Name input - only show if player hasn't set a name yet */}
+            {!hasName && (
               <div
                 className="flex gap-2"
                 style={{ animation: "slideUp 0.4s ease-out 0.3s both", marginTop: 16, width: 300 }}
@@ -1130,7 +1190,7 @@ export default function FlappyBird() {
                   type="text"
                   value={playerName}
                   onChange={(e) => setPlayerName(e.target.value)}
-                  placeholder="Adınız..."
+                  placeholder="Adınızı daxil edin..."
                   maxLength={15}
                   style={{
                     flex: 1,
@@ -1156,12 +1216,34 @@ export default function FlappyBird() {
               </div>
             )}
 
+            {/* Show saved name badge if player already has a name */}
+            {hasName && !scoreSaved && (
+              <div style={{ animation: "slideUp 0.4s ease-out 0.3s both", marginTop: 16 }}>
+                <ArcadeButton color="blue" size="md" onClick={handleSaveScore}>
+                  {"📤 Skoru Saxla"}
+                </ArcadeButton>
+              </div>
+            )}
+
+            {scoreSaved && (
+              <div style={{
+                animation: "slideUp 0.4s ease-out 0.3s both",
+                marginTop: 16,
+                fontFamily: "var(--font-body)",
+                fontSize: 14,
+                fontWeight: 700,
+                color: "#6ecf5c",
+              }}>
+                {"✓ Skor saxlanıldı!"}
+              </div>
+            )}
+
             {/* Action Buttons */}
             <div
               className="flex gap-3"
               style={{ animation: "slideUp 0.4s ease-out 0.45s both", marginTop: 18 }}
             >
-              <ArcadeButton color="green" size="md" onClick={startGame}>
+              <ArcadeButton color="green" size="md" onClick={hasName ? handleAutoSaveAndReplay : startGame}>
                 {"↻ Yenidən"}
               </ArcadeButton>
               <ArcadeButton color="orange" size="md" onClick={() => setScreen("menu")}>
@@ -1263,7 +1345,14 @@ export default function FlappyBird() {
                 </span>
               </div>
 
-              {leaderboard.length === 0 ? (
+              {leaderboardLoading ? (
+                <div style={{ padding: "48px 20px", textAlign: "center" }}>
+                  <div style={{ fontSize: 36, marginBottom: 8 }}>{"⏳"}</div>
+                  <p style={{ fontFamily: "var(--font-body)", fontSize: 14, color: "rgba(255,255,255,0.35)", fontWeight: 600 }}>
+                    {"Yüklənir..."}
+                  </p>
+                </div>
+              ) : leaderboard.length === 0 ? (
                 <div style={{ padding: "48px 20px", textAlign: "center" }}>
                   <div style={{ fontSize: 36, marginBottom: 8 }}>{"🎮"}</div>
                   <p style={{ fontFamily: "var(--font-body)", fontSize: 14, color: "rgba(255,255,255,0.35)", fontWeight: 600 }}>
@@ -1327,6 +1416,103 @@ export default function FlappyBird() {
               </GlassButton>
             </div>
           </Overlay>
+        )}
+        {/* =========== NAME POPUP =========== */}
+        {showNamePopup && (
+          <div style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.7)",
+            backdropFilter: "blur(8px)",
+            animation: "fadeIn 0.3s ease-out both",
+          }}>
+            <div style={{
+              animation: "scaleIn 0.4s ease-out both",
+              background: "linear-gradient(135deg, rgba(30,40,60,0.95) 0%, rgba(20,25,40,0.98) 100%)",
+              borderRadius: 24,
+              border: "1px solid rgba(255,255,255,0.1)",
+              padding: "32px 28px",
+              width: 300,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 16,
+              boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+            }}>
+              <div style={{ fontSize: 40 }}>{"👋"}</div>
+              <h3 style={{
+                fontFamily: "var(--font-display)",
+                fontSize: 22,
+                fontWeight: 700,
+                color: "#fff",
+                textAlign: "center",
+              }}>
+                {"Xoş gəldin!"}
+              </h3>
+              <p style={{
+                fontFamily: "var(--font-body)",
+                fontSize: 14,
+                fontWeight: 600,
+                color: "rgba(255,255,255,0.5)",
+                textAlign: "center",
+                lineHeight: 1.4,
+              }}>
+                {"Lider cədvəldə görünmək üçün adını daxil et"}
+              </p>
+              <input
+                type="text"
+                value={playerName}
+                placeholder="Adınız..."
+                maxLength={15}
+                autoFocus
+                style={{
+                  width: "100%",
+                  fontFamily: "var(--font-body)",
+                  fontSize: 18,
+                  fontWeight: 700,
+                  padding: "14px 16px",
+                  borderRadius: 14,
+                  border: "2px solid rgba(255,255,255,0.15)",
+                  background: "rgba(255,255,255,0.08)",
+                  color: "#fff",
+                  outline: "none",
+                  backdropFilter: "blur(8px)",
+                  textAlign: "center",
+                  transition: "border-color 0.2s",
+                }}
+                onFocus={(e) => (e.target.style.borderColor = "rgba(255,204,51,0.5)")}
+                onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.15)")}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleNameSubmit();
+                  e.stopPropagation();
+                }}
+                onChange={(e) => { setPlayerName(e.target.value); setNameError(""); }}
+              />
+              {nameError && (
+                <p style={{
+                  fontFamily: "var(--font-body)",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: "#ff6b6b",
+                  textAlign: "center",
+                  margin: 0,
+                }}>
+                  {nameError}
+                </p>
+              )}
+              <ArcadeButton
+                color="green"
+                size="md"
+                onClick={handleNameSubmit}
+              >
+                {nameChecking ? "Yoxlanır..." : "Davam et"}
+              </ArcadeButton>
+            </div>
+          </div>
         )}
       </div>
     </div>

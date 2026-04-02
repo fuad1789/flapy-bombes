@@ -487,3 +487,14 @@ export function saveSoundEnabled(enabled: boolean): void {
   if (typeof window === "undefined") return;
   localStorage.setItem("flappy_sound", String(enabled));
 }
+
+// --- Player Name (persistent, set once) ---
+export function getSavedPlayerName(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem("flappy_player_name") || "";
+}
+
+export function savePlayerName(name: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("flappy_player_name", name);
+}
